@@ -1,5 +1,7 @@
 # @nightsquawktech/mcp-core
 
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/NightSquawk/mcp-core/badge)](https://scorecard.dev/viewer/?uri=github.com/NightSquawk/mcp-core)
+
 Shared runtime for NightSquawk's catalog-backed [MCP](https://modelcontextprotocol.io) servers: a stdio bootstrap plus the primitives used by the `list_endpoints` / `describe_endpoint` / `call_endpoint` tool pattern.
 
 Used by:
