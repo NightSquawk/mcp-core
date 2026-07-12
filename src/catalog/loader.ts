@@ -10,7 +10,7 @@ import { join } from "node:path";
  * IMPORTANT — inverted path resolution: the *server* resolves its own catalog
  * directory (from the server module's own location) and passes it in. This
  * loader NEVER derives the path from its own module location, because once it
- * lives in node_modules/@nightsquawk/mcp-core it would otherwise look for the
+ * lives in node_modules/@nightsquawktech/mcp-core it would otherwise look for the
  * catalog next to the library instead of next to the server's data.
  *
  * Entry ids are validated against a flat-identifier pattern to prevent path

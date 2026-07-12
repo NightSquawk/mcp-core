@@ -1,5 +1,5 @@
 /**
- * @nightsquawk/mcp-core/catalog — primitives for catalog-backed MCP servers.
+ * @nightsquawktech/mcp-core/catalog — primitives for catalog-backed MCP servers.
  *
  * These use the SDK's single-schema `server.tool(...)` registration form and a
  * generic on-disk catalog loader. The list/describe/call tool factories stay

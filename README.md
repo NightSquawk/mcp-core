@@ -1,12 +1,12 @@
-# @nightsquawk/mcp-core
+# @nightsquawktech/mcp-core
 
 Shared runtime for NightSquawk's catalog-backed [MCP](https://modelcontextprotocol.io) servers: a stdio bootstrap plus the primitives used by the `list_endpoints` / `describe_endpoint` / `call_endpoint` tool pattern.
 
 Used by:
 
-- [@nightsquawk/proxmox-mcp-server](https://github.com/NightSquawk/proxmox-mcp-server)
-- [@nightsquawk/appfolio-mcp-server](https://github.com/NightSquawk/appfolio-mcp-server)
-- [@nightsquawk/invoiceninja-mcp-server](https://github.com/NightSquawk/invoiceninja-mcp-server)
+- [@nightsquawktech/proxmox-mcp-server](https://github.com/NightSquawk/proxmox-mcp-server)
+- [@nightsquawktech/appfolio-mcp-server](https://github.com/NightSquawk/appfolio-mcp-server)
+- [@nightsquawktech/invoiceninja-mcp-server](https://github.com/NightSquawk/invoiceninja-mcp-server)
 
 See the [mcp-servers](https://github.com/NightSquawk/mcp-servers) index for the full catalog.
 
@@ -23,17 +23,17 @@ This package holds the parts of that pattern that are identical across servers. 
 ## Install
 
 ```bash
-npm install @nightsquawk/mcp-core
+npm install @nightsquawktech/mcp-core
 ```
 
 Peer dependencies (bring your own versions): `@modelcontextprotocol/sdk` >= 1.6.0 and `zod` ^3.24.
 
 ## API
 
-### Main entry: `@nightsquawk/mcp-core`
+### Main entry: `@nightsquawktech/mcp-core`
 
 ```ts
-import { createMcpServer, runStdioServer } from "@nightsquawk/mcp-core";
+import { createMcpServer, runStdioServer } from "@nightsquawktech/mcp-core";
 
 const server = createMcpServer({ name: "my-server", version: "1.0.0" });
 // ...register tools...
@@ -43,7 +43,7 @@ await runStdioServer(server, { banner: "my-server running on stdio" });
 - `createMcpServer({ name, version })`: thin wrapper over the SDK's `McpServer`.
 - `runStdioServer(server, { banner? })`: connects a stdio transport. The banner goes to stderr because stdout is reserved for the MCP protocol.
 
-### Catalog entry: `@nightsquawk/mcp-core/catalog`
+### Catalog entry: `@nightsquawktech/mcp-core/catalog`
 
 ```ts
 import {
@@ -53,7 +53,7 @@ import {
   type ToolDefinition,
   type ToolResponse,
   type CatalogStore,
-} from "@nightsquawk/mcp-core/catalog";
+} from "@nightsquawktech/mcp-core/catalog";
 ```
 
 - `createCatalogStore<I>(catalogDir, options?)`: cached loader for a catalog directory containing an aggregate `index.json` plus one JSON file per entry under a subdirectory (default `endpoints/`). Returns `{ index(), entry(id, subdir?), has(id, subdir?) }`. Entry ids are validated against `^[a-z0-9_]+$` to prevent path traversal.
@@ -73,7 +73,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const store = createCatalogStore<MyIndex>(join(here, "..", "catalog"));
 ```
 
-This matters because once the loader lives in `node_modules/@nightsquawk/mcp-core`, resolving from the library's own location would point at the wrong place. It compiles either way; it only fails at runtime.
+This matters because once the loader lives in `node_modules/@nightsquawktech/mcp-core`, resolving from the library's own location would point at the wrong place. It compiles either way; it only fails at runtime.
 
 ## License
 

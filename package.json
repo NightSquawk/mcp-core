@@ -1,5 +1,5 @@
 {
-  "name": "@nightsquawk/mcp-core",
+  "name": "@nightsquawktech/mcp-core",
   "version": "0.1.0",
   "description": "Shared runtime for NightSquawk catalog-backed MCP servers: stdio bootstrap plus catalog registration + loader primitives.",
   "license": "AGPL-3.0-only",
