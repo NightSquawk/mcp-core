@@ -171,6 +171,22 @@ describe("step 4: argument checks", () => {
     assert.equal(lines(guard).at(-1).client, "NST-internal");
   });
 
+  test("the approver and the dry-run approval text see the same client as the audit line", async (t) => {
+    const asked = [];
+    const spy = { name: "none", human: false, request: async (p, text) => (asked.push({ p, text }), { result: "approved", approver: "none", human: false }) };
+    const { guard } = mk(t, { guard: { approvers: { none: spy }, defaultClient: () => "NST-internal" } });
+    const dry = await exec(guard, "payment_create", pay(100), { dryRun: true });
+    assert.equal(dry.preview.client, "NST-internal");
+    assert.match(dry.preview.approval_text, /^Client: NST-internal$/m);
+    assert.equal(code(await exec(guard, "payment_create", pay(100))), "done");
+    assert.equal(asked[0].p.client, "NST-internal");
+    assert.match(asked[0].text, /^Client: NST-internal$/m);
+    // The extraction's own client still wins over the default.
+    await exec(guard, "payment_create", pay(200, { client: "Acme" }));
+    assert.equal(asked[1].p.client, "Acme");
+    assert.equal(lines(guard).at(-1).client, "Acme");
+  });
+
   test("canaries refuse, alert and trip the kill switch; a salt is required", async (t) => {
     const { guard } = mk(t, { policy: { ...ALL_ON, canaries: { hashes: [canaryHash("thing_canary", "s4lt")] } }, env: { NST_MCP_CANARY_SALT: "s4lt" } });
     const h = stub();

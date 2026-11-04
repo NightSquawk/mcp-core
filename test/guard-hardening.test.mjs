@@ -411,3 +411,32 @@ test("programDataDir: a value holding a control character or line separator fall
   const q = String.fromCharCode(0x2019);
   assert.equal(programDataDir({ ProgramData: `C:\\Users\\o${q}brien` }), `C:\\Users\\o${q}brien`, "a quote character is quoted later, not refused here");
 });
+
+test("redact and tokensOf stay linear on long adversarial strings", async () => {
+  const { redact, redactValue } = await import("../dist/guard/index.js");
+  const { tokensOf } = await import("../dist/guard/session.js");
+  const N = 400_000;
+  const inputs = {
+    letters: "x".repeat(N),
+    alnum: "a1".repeat(N / 2),
+    dotted: "a.".repeat(N / 2),
+    schemes: "a://".repeat(N / 4),
+    dots: `a${".".repeat(N)}a`,
+    dashes: `1${"-".repeat(N)}x`,
+  };
+  for (const [name, s] of Object.entries(inputs)) {
+    const t0 = performance.now();
+    redact(s);
+    redactValue({ v: s });
+    tokensOf(s);
+    const ms = performance.now() - t0;
+    // Quadratic forms take minutes here; linear ones a few milliseconds.
+    assert.ok(ms < 2_000, `${name}: ${ms.toFixed(0)} ms`);
+  }
+  // The rules still do their job.
+  assert.equal(redact("see https://user:pa55@example.com/x"), "see https://[redacted]@example.com/x");
+  assert.equal(redact('{"u":"sftp://bob:pw@h"}'), '{"u":"sftp://[redacted]@h"}');
+  assert.deepEqual(tokensOf("...abc-def..."), ["abc-def"]);
+  assert.deepEqual(tokensOf(`a${".".repeat(10)}b`), [`a${".".repeat(10)}b`]);
+  assert.deepEqual(tokensOf("+.-x1y2-.+"), ["x1y2"]);
+});

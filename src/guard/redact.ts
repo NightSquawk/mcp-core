@@ -14,8 +14,10 @@ export const SHARED_RULES: readonly RedactRule[] = Object.freeze([
   [/\b(sk|rk)_(?:(?:test|live)_)?[A-Za-z0-9]{8,}/g, "$1_[redacted]"],
   // Credentials in query strings and key=value text
   [/\b((?:api[_-]?key|access[_-]?token|key|token|password|passwd|secret|client[_-]?secret)=)[^&\s"']+/gi, "$1[redacted]"],
-  // URL user-info
-  [/([a-z][a-z0-9+.-]*:\/\/)[^/@\s"']+@/gi, "$1[redacted]@"],
+  // URL user-info. The scheme starts at a word boundary and is at most 32 characters,
+  // so a long run of letters (base64 data, a padded field) is scanned once, not once
+  // per position: the unbounded form took 47 s on a 250 KB string.
+  [/\b([a-z][a-z0-9+.-]{0,31}:\/\/)[^/@\s"']+@/gi, "$1[redacted]@"],
   // Account and routing numbers: runs of 8-17 digits keep only their last 4
   [/\b\d{4,13}(\d{4})\b/g, "****$1"],
 ] as RedactRule[]);

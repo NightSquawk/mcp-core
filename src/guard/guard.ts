@@ -647,7 +647,7 @@ export class Guard<P extends BasePolicy = BasePolicy> {
 
     // dry_run stops here: no approver contact, nothing recorded.
     if (input.dryRun) {
-      const proposal = buildProposal({ server: this.server, operation: op, group, mode: this.mode, extraction, requestHash, idempotencyKey: key, policyHash: this.loaded.hash, reason: input.reason, now });
+      const proposal = buildProposal({ server: this.server, operation: op, group, mode: this.mode, extraction, client, requestHash, idempotencyKey: key, policyHash: this.loaded.hash, reason: input.reason, now });
       const effect =
         approver.name === "none"
           ? "Runs immediately; the harness rules for this tool still apply."
@@ -704,7 +704,7 @@ export class Guard<P extends BasePolicy = BasePolicy> {
     const release = () => void this.#finish(key, "failed");
 
     // 6. Approval.
-    const proposal = buildProposal({ server: this.server, operation: op, group, mode: this.mode, extraction, requestHash, idempotencyKey: key, policyHash: this.loaded.hash, reason: input.reason, now });
+    const proposal = buildProposal({ server: this.server, operation: op, group, mode: this.mode, extraction, client, requestHash, idempotencyKey: key, policyHash: this.loaded.hash, reason: input.reason, now });
     let decision;
     try {
       decision = await approver.request(proposal, proposalText(proposal, (t) => this.#redactor(t, this.#secrets())));

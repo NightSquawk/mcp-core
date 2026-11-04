@@ -9,6 +9,21 @@ import { nonce } from "./canonical.js";
 const MIN_TOKEN = 4;
 const MAX_TOKENS = 200_000;
 
+const EDGE_PUNCTUATION = new Set([".", "+", "-"]);
+
+/**
+ * Strip leading and trailing . + - in one pass. (The regex form
+ * /^[.+-]+|[.+-]+$/ rescans the run from every position: quadratic on a long run
+ * of dots inside one token.)
+ */
+function trimPunctuation(token: string): string {
+  let start = 0;
+  let end = token.length;
+  while (start < end && EDGE_PUNCTUATION.has(token[start]!)) start++;
+  while (end > start && EDGE_PUNCTUATION.has(token[end - 1]!)) end--;
+  return token.slice(start, end);
+}
+
 /**
  * Normalized tokens in a piece of text: identifiers, emails, phone and account
  * numbers. Digit groups joined by spaces, dots or dashes also count as one token
@@ -17,7 +32,7 @@ const MAX_TOKENS = 200_000;
 export function tokensOf(text: string): string[] {
   const out = new Set<string>();
   for (const m of text.matchAll(/[A-Za-z0-9_@.+-]+/g)) {
-    const t = m[0].replace(/^[.+-]+|[.+-]+$/g, "").toLowerCase();
+    const t = trimPunctuation(m[0]).toLowerCase();
     if (t.length >= MIN_TOKEN) out.add(t);
   }
   for (const m of text.matchAll(/\d(?:[\d \t.-]*\d)?/g)) {

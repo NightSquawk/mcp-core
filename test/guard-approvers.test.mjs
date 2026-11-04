@@ -82,6 +82,12 @@ describe("proposalText", () => {
     assert.ok(![...text].some((c) => c.codePointAt(0) > 0x7e && c !== "\n"));
   });
 
+  test("the proposal line is never redacted, even when its hash prefix is all digits", () => {
+    const p = { ...buildProposal(input()), hash: "sha256:12345678" + "f".repeat(56) };
+    const lines = proposalText(p).split("\n");
+    assert.ok(lines.includes(`Proposal 12345678, expires ${p.expires_at}`), lines.join("\n"));
+  });
+
   test("the redactor runs over every line", () => {
     const text = proposalText(buildProposal(input({ reason: "key toysecret_ABCDEFGH12345678" })), (s) => s.replace(/toysecret_\w+/g, "[redacted]"));
     assert.ok(!text.includes("toysecret_ABCD"));

@@ -74,6 +74,11 @@ export interface ProposalInput {
   group: Group;
   mode: Mode;
   extraction: Extraction;
+  /**
+   * The client the guard resolved for this call (the extraction's, else the server's
+   * defaultClient). The approver sees the same client the audit line records.
+   */
+  client?: string | null;
   requestHash: string;
   idempotencyKey: string;
   policyHash: string | null;
@@ -100,7 +105,7 @@ export function buildProposal(input: ProposalInput): Proposal {
     ...(typeof ex.amount_cents === "number" ? { amount_cents: ex.amount_cents } : {}),
     ...(ex.currency ? { currency: ex.currency } : {}),
     targets: (ex.targets ?? []).map((t) => ({ kind: t.kind, value: t.value, role: t.role })),
-    client: ex.client ?? null,
+    client: input.client ?? ex.client ?? null,
     request_hash: input.requestHash,
     idempotency_key: input.idempotencyKey,
     policy_hash: input.policyHash,
@@ -121,7 +126,8 @@ function money(cents: number, currency?: string): string {
 
 /**
  * The text an approver sees. Everything except the last line is written by core
- * from parsed values and passed through redact(); the model's reason comes last.
+ * from parsed values; the value lines pass through redact(), the proposal hash and
+ * expiry line does not, and the model's reason comes last.
  */
 export function proposalText(p: Proposal, redactor: Redactor = sharedRedact): string {
   const lines = [
@@ -130,8 +136,10 @@ export function proposalText(p: Proposal, redactor: Redactor = sharedRedact): st
     ...p.targets.map((t) => `${t.role === "payee" ? "Payee" : t.role === "source" ? "From" : "Target"} ${t.kind}: ${t.value}`),
     ...(p.client ? [`Client: ${p.client}`] : []),
     ...p.notes.map((n) => `Note: ${n}`),
-    `Proposal ${p.hash.slice(7, 15)}, expires ${p.expires_at}`,
   ].map((l) => sanitizeUntrusted(redactor(l)));
+  // The guard's own hash and expiry are not redacted: an all-digit hash prefix
+  // (about 2% of proposals) would otherwise be masked like an account number.
+  lines.push(`Proposal ${p.hash.slice(7, 15)}, expires ${p.expires_at}`);
   if (p.agent_says) lines.push(`Agent says (unverified): ${sanitizeUntrusted(redactor(p.agent_says))}`);
   return lines.join("\n");
 }
