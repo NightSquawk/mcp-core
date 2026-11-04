@@ -1,14 +1,20 @@
 import { createHash, randomBytes } from "node:crypto";
 
-/** JSON with object keys sorted at every depth and `undefined` members dropped. */
+/**
+ * JSON with object keys sorted at every depth and `undefined` members dropped.
+ * Values with toJSON (Date) serialize as JSON.stringify would. Objects are built
+ * without a prototype, so an own `__proto__` member (JSON.parse creates one) is
+ * kept and covered by the hash instead of being applied as a prototype.
+ */
 export function canonicalJson(value: unknown): string {
   const walk = (v: unknown): unknown => {
+    if (v && typeof v === "object" && typeof (v as { toJSON?: unknown }).toJSON === "function") v = (v as { toJSON: () => unknown }).toJSON();
     if (Array.isArray(v)) return v.map((x) => (x === undefined ? null : walk(x)));
     if (v && typeof v === "object") {
-      const out: Record<string, unknown> = {};
+      const out = Object.create(null) as Record<string, unknown>;
       for (const k of Object.keys(v as Record<string, unknown>).sort()) {
         const x = (v as Record<string, unknown>)[k];
-        if (x !== undefined) out[k] = walk(x);
+        if (x !== undefined && typeof x !== "function" && typeof x !== "symbol") out[k] = walk(x);
       }
       return out;
     }

@@ -98,7 +98,9 @@ export const auditSchema = z
 
 export const taintSchema = z.object({ egress_after_untrusted: z.enum(["approve", "deny", "allow"]).default("approve") }).strict();
 
-export const canariesSchema = z.object({ hashes: z.array(z.string().regex(/^sha256:[0-9a-f]{64}$/)).default([]) }).strict();
+export const canariesSchema = z
+  .object({ hashes: z.array(z.string().regex(/^sha256:[0-9a-f]{64}$/, '"sha256:" followed by 64 lowercase hex characters (mcp-guard canary add)')).default([]) })
+  .strict();
 
 export const clientScopeSchema = z
   .object({ allowed: z.array(z.string().min(1)).min(1), lock_per_session: z.boolean().default(false) })
@@ -108,7 +110,7 @@ const allowValue = z.union([z.string().min(1), z.number()]).transform(String);
 
 export const basePolicyShape = {
   version: z.literal(1),
-  server: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/),
+  server: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/, "the server name: lowercase letters, digits, _ or -, at most 64 characters"),
   groups: groupsSchema.default({}),
   tiers_off: z.array(z.enum(TIERS)).default([]),
   environment: environmentSchema.default({}),
@@ -183,9 +185,11 @@ export function loadPolicy<P extends BasePolicy = BasePolicy>(opts: LoadPolicyOp
   } catch {
     mtimeMs = null;
   }
+  // A UTF-8 byte order mark (Windows PowerShell 5.1 "Set-Content -Encoding UTF8") is not part of the JSON.
+  const body = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
   let raw: unknown;
   try {
-    raw = JSON.parse(text);
+    raw = JSON.parse(body);
   } catch (e) {
     return { policy: fallback(), source: "default", path, override, hash, mtimeMs, error: `${path} is not valid JSON: ${(e as Error).message}` };
   }

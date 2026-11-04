@@ -106,7 +106,9 @@ export class AuditLog {
     }
     return withFileLock(join(this.dir, "audit.lock"), () => {
       const prev = this.#lastHash(file) ?? genesis(this.server, month);
-      const body: Omit<AuditLine, "hash"> = { v: 1, ts: now.toISOString(), pid: process.pid, ...clean, prev };
+      // The chain fields are always the log's own: an entry cannot backdate, re-number or re-link a line.
+      const { v: _v, ts: _ts, pid: _pid, prev: _prev, hash: _hash, ...fields } = clean as unknown as Record<string, unknown>;
+      const body = { v: 1, ts: now.toISOString(), pid: process.pid, ...fields, prev } as Omit<AuditLine, "hash">;
       const line: AuditLine = { ...body, hash: lineHash(prev, body) };
       appendFileSync(file, JSON.stringify(line) + "\n", { mode: 0o600 });
       return line;
@@ -173,7 +175,9 @@ export class AuditLog {
       for (const l of readFileSync(file, "utf8").split("\n")) {
         if (!l.trim()) continue;
         try {
-          out.push(JSON.parse(l) as AuditLine);
+          const x = JSON.parse(l) as AuditLine | null;
+          // Lines that are not audit lines (null, arrays, a bad timestamp) are skipped like corrupt ones; verify() reports them.
+          if (x && typeof x === "object" && !Array.isArray(x) && typeof x.ts === "string" && !Number.isNaN(Date.parse(x.ts)) && typeof x.hash === "string") out.push(x);
         } catch {
           // skipped; verify() reports it
         }

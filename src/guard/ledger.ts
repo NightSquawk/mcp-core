@@ -65,7 +65,8 @@ export class Ledger {
   #rebuild(): LedgerFile {
     const events: LedgerEvent[] = [];
     for (const l of this.#audit?.read() ?? []) {
-      if (!l.group || l.dry_run) continue;
+      // read() already drops lines that are not audit lines; also skip ones with fields of the wrong type.
+      if (typeof l.group !== "string" || l.dry_run || Number.isNaN(Date.parse(l.ts)) || typeof l.operation !== "string") continue;
       const status: LedgerStatus | null =
         l.decision === "executed" ? "done" : l.decision === "pending" ? "pending" : l.decision === "unknown_outcome" ? "unknown" : null;
       if (!status) continue;
@@ -74,8 +75,8 @@ export class Ledger {
         t: Date.parse(l.ts),
         group: l.group,
         op: l.operation,
-        ...(l.amount_cents !== undefined ? { cents: l.amount_cents } : {}),
-        ...(l.currency ? { currency: l.currency } : {}),
+        ...(typeof l.amount_cents === "number" && Number.isFinite(l.amount_cents) ? { cents: l.amount_cents } : {}),
+        ...(typeof l.currency === "string" ? { currency: l.currency } : {}),
         status,
       });
     }

@@ -21,6 +21,19 @@ function pathLib(platform: NodeJS.Platform) {
   return platform === "win32" ? win32 : posix;
 }
 
+export const DEFAULT_PROGRAM_DATA = "C:\\ProgramData";
+
+/**
+ * Windows ProgramData from the environment. A blank or non drive-absolute value
+ * (which would resolve against the working folder) falls back to C:\ProgramData.
+ * The protection check verifies owners, so a redirected value cannot make a
+ * user-owned folder count as protected.
+ */
+export function programDataDir(env: NodeJS.ProcessEnv): string {
+  const raw = (env.ProgramData ?? "").trim() || (env.PROGRAMDATA ?? "").trim();
+  return /^[A-Za-z]:[\\/]/.test(raw) ? raw : DEFAULT_PROGRAM_DATA;
+}
+
 /** The directory holding every server's policy folder, and whether it is the test override. */
 export function policyRoot(opts: PathOptions = {}): { root: string; override: boolean } {
   const platform = opts.platform ?? process.platform;
@@ -28,8 +41,7 @@ export function policyRoot(opts: PathOptions = {}): { root: string; override: bo
   const override = (env.NST_MCP_POLICY_DIR ?? "").trim();
   if (override) return { root: pathLib(platform).resolve(override), override: true };
   if (platform === "win32") {
-    const programData = (env.ProgramData ?? env.PROGRAMDATA ?? "C:\\ProgramData").trim();
-    return { root: win32.join(programData, "NightSquawk", "mcp"), override: false };
+    return { root: win32.join(programDataDir(env), "NightSquawk", "mcp"), override: false };
   }
   return { root: "/etc/nightsquawk-mcp", override: false };
 }

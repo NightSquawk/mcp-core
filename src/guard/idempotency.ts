@@ -18,10 +18,39 @@ export interface DeriveKeyInput {
   maxLength?: number;
 }
 
+/** The digest part of a key never shrinks below this (96 bits); the server label is cut first. */
+export const MIN_KEY_DIGEST_HEX = 24;
+/** The shortest provider limit a guard accepts: "nst-" + 24 digest characters + room for a label. */
+export const MIN_KEY_LENGTH = 32;
+
 export function deriveKey(input: DeriveKeyInput): string {
   const digest = sha256Hex(`nst-mcp-guard/v1\n${input.server}\n${input.operation}\n${input.proposalDay}\n${input.canonicalBody}`);
+  const max = Math.max(16, input.maxLength ?? 255);
   const key = `nst-${input.server}-${digest}`;
-  return key.slice(0, Math.max(16, input.maxLength ?? 255));
+  if (key.length <= max) return key;
+  // Keep at least MIN_KEY_DIGEST_HEX digest characters: a long server name must never cut the
+  // digest away (every request would then share one key). When the plain cut keeps enough, this
+  // is exactly key.slice(0, max).
+  const keepDigest = Math.min(digest.length, Math.max(MIN_KEY_DIGEST_HEX, max - `nst-${input.server}-`.length));
+  const labelRoom = max - "nst--".length - keepDigest;
+  if (labelRoom <= 0) return `nst-${digest}`.slice(0, max);
+  return `nst-${input.server.slice(0, labelRoom)}-${digest.slice(0, keepDigest)}`;
+}
+
+/**
+ * The store's file exists but cannot be read as a store. The guard refuses
+ * (state_unreadable) until a human looks at it: starting empty would let a
+ * completed call run again.
+ */
+export class IdempotencyStateError extends Error {
+  readonly code = "state_unreadable";
+  constructor(
+    readonly file: string,
+    detail: string
+  ) {
+    super(`The idempotency store ${file} is unreadable (${detail}). Nothing runs until a human inspects it and moves it aside.`);
+    this.name = "IdempotencyStateError";
+  }
 }
 
 export type IdemStatus = "in_flight" | "done" | "pending" | "unknown" | "failed";
@@ -65,12 +94,33 @@ export class IdempotencyStore {
   }
 
   #load(): IdemFile {
+    let f: unknown;
     try {
-      const f = readJsonFile<IdemFile>(this.file, { version: 1, entries: {} });
-      return f && typeof f.entries === "object" ? f : { version: 1, entries: {} };
-    } catch {
-      return { version: 1, entries: {} };
+      f = readJsonFile<unknown>(this.file, { version: 1, entries: {} });
+    } catch (e) {
+      // Never fall back to an empty store, and never overwrite the bad file (fail closed).
+      throw new IdempotencyStateError(this.file, e instanceof SyntaxError ? "not valid JSON" : ((e as NodeJS.ErrnoException).code ?? "read failed"));
     }
+    const entries = f && typeof f === "object" ? (f as { entries?: unknown }).entries : undefined;
+    if (!entries || typeof entries !== "object" || Array.isArray(entries)) throw new IdempotencyStateError(this.file, "no entries object");
+    for (const e of Object.values(entries as Record<string, unknown>)) {
+      const x = e as Partial<IdemEntry> | null;
+      if (!x || typeof x !== "object" || typeof x.key !== "string" || typeof x.status !== "string" || typeof x.created_at !== "string" || Number.isNaN(Date.parse(x.created_at))) {
+        throw new IdempotencyStateError(this.file, "an entry is malformed");
+      }
+    }
+    return f as IdemFile;
+  }
+
+  /**
+   * Whether an existing entry lets the same request run again. Only `failed` (never
+   * sent, or refused by the provider) and `done` entries older than the window do.
+   * `in_flight`, `unknown` and `pending` may have executed (or hold an approval), so
+   * they leave only through reclaimUnknown(), cancel(), or the three-day prune.
+   */
+  #reopens(e: IdemEntry, windowMs: number | undefined, now: number): boolean {
+    if (e.status === "failed") return true;
+    return e.status === "done" && windowMs !== undefined && now - Date.parse(e.created_at) > windowMs;
   }
 
   #normalize(e: IdemEntry): IdemEntry {
@@ -80,32 +130,33 @@ export class IdempotencyStore {
     return e;
   }
 
-  /** The first of `keys` with an entry (no write; used by dry_run and step 5). */
+  /** The first of `keys` with an entry (no write; used by dry_run and step 5). A `done` entry past the window is skipped. */
   lookup(keys: readonly string[], opts: { windowMs?: number } = {}): IdemEntry | null {
     const f = this.#load();
     const now = this.#clock().getTime();
     for (const k of keys) {
-      const e = f.entries[k];
+      const e = Object.prototype.hasOwnProperty.call(f.entries, k) ? f.entries[k] : undefined;
       if (!e) continue;
-      if (opts.windowMs !== undefined && now - Date.parse(e.created_at) > opts.windowMs && e.status !== "in_flight") continue;
-      return this.#normalize(e);
+      const n = this.#normalize(e);
+      if (n.status === "done" && this.#reopens(n, opts.windowMs, now)) continue;
+      return n;
     }
     return null;
   }
 
   /**
    * Atomically claim `key` for execution. Returns the existing entry instead when
-   * another call holds or finished it (failed entries may be retried).
+   * another call holds it, finished it inside the window, or may have run it
+   * (failed entries and done entries past the window may be claimed).
    */
   begin(key: string, info: { operation: string; request_hash: string; day: string }, opts: { windowMs?: number } = {}): { claimed: true } | { claimed: false; existing: IdemEntry } {
     return withFileLock(this.#lock, () => {
       const f = this.#load();
       const now = this.#clock();
       for (const [k, e] of Object.entries(f.entries)) if (now.getTime() - Date.parse(e.created_at) > KEEP_MS) delete f.entries[k];
-      const existing = f.entries[key] ? this.#normalize(f.entries[key]) : null;
-      const expired = existing && opts.windowMs !== undefined && now.getTime() - Date.parse(existing.created_at) > opts.windowMs && existing.status !== "in_flight";
+      const existing = Object.prototype.hasOwnProperty.call(f.entries, key) ? this.#normalize(f.entries[key]) : null;
       // `unknown` is never claimed here: only reclaimUnknown() may retry it, for a provider that dedupes on the key.
-      if (existing && existing.status !== "failed" && !expired) {
+      if (existing && !this.#reopens(existing, opts.windowMs, now.getTime())) {
         return { claimed: false, existing };
       }
       f.entries[key] = { key, ...info, status: "in_flight", created_at: now.toISOString(), pid: process.pid };
@@ -136,14 +187,22 @@ export class IdempotencyStore {
     });
   }
 
-  /** Mark a pending entry cancelled locally (mcp-guard cancel). */
+  /**
+   * Mark a pending or unknown-outcome entry failed (mcp-guard cancel), so the same
+   * request may run again. The prefix (or suffix) must match exactly one entry; a
+   * completed or currently running call is never reopened. This does not cancel a
+   * hold at the provider.
+   */
   cancel(keyPrefix: string): IdemEntry | null {
+    const needle = keyPrefix.trim();
+    if (!needle) return null;
     return withFileLock(this.#lock, () => {
       const f = this.#load();
-      const match = Object.values(f.entries).filter((e) => e.key.startsWith(keyPrefix) || e.key.endsWith(keyPrefix));
+      const match = Object.values(f.entries).filter((e) => e.key.startsWith(needle) || e.key.endsWith(needle));
       if (match.length !== 1) return null;
-      const e = match[0];
-      f.entries[e.key] = { ...e, status: "failed", finished_at: this.#clock().toISOString() };
+      const e = this.#normalize(match[0]);
+      if (e.status !== "pending" && e.status !== "unknown") return null;
+      f.entries[e.key] = { ...match[0], status: "failed", finished_at: this.#clock().toISOString() };
       writeJsonFile(this.file, f);
       return f.entries[e.key];
     });

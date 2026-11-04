@@ -9,9 +9,10 @@
  * `reg query`; none of them changes anything.
  */
 import { spawnSync } from "node:child_process";
-import { closeSync, lstatSync, openSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, lstatSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { posix, win32 } from "node:path";
 import { randomBytes } from "node:crypto";
+import { DEFAULT_PROGRAM_DATA, programDataDir } from "./paths.js";
 
 export interface StatInfo {
   isFile: boolean;
@@ -25,8 +26,19 @@ export interface RunResult {
   status: number | null;
   stdout: string;
   stderr: string;
-  /** Spawn error code (ENOENT when the program is missing). */
+  /** Spawn error code (ENOENT when the program is missing, ETIMEDOUT after the timeout). */
   error?: string;
+  /** The signal that ended the process, if any. */
+  signal?: string;
+}
+
+/** Owner and reparse flag of one path (Windows). */
+export interface WindowsOwnerInfo {
+  path: string;
+  /** Owner SID, or null when it could not be read. */
+  owner: string | null;
+  /** A junction, symlink or other reparse point. */
+  reparse: boolean;
 }
 
 export interface ProtectionProbes {
@@ -40,6 +52,17 @@ export interface ProtectionProbes {
   /** Windows: can the current user create (and delete) a file in this folder? */
   canCreateIn(dir: string): boolean;
   env: NodeJS.ProcessEnv;
+  /**
+   * Read a small text file, or null when it cannot be read (Linux: /proc/self/uid_map).
+   * Optional only so hand-made test doubles keep working; realProbes() always has it,
+   * and a probe that has it but returns null fails the check closed.
+   */
+  readText?(path: string): string | null;
+  /**
+   * Windows: owner SID and reparse flag for each path, in one call; null when the
+   * owners cannot be read (fails closed). Optional for the same reason as readText.
+   */
+  windowsOwners?(paths: readonly string[]): WindowsOwnerInfo[] | null;
 }
 
 export interface ProtectionPart {
@@ -59,6 +82,49 @@ export interface ProtectionReport {
 
 /** Groups that are root-equivalent on Linux. */
 export const ROOT_EQUIVALENT_GROUPS = Object.freeze(["docker", "lxd", "incus-admin", "libvirt", "disk"]);
+
+/** The uid_map of a process that is not in a user namespace. */
+export const IDENTITY_UID_MAP = "0 0 4294967295";
+
+/** Owners a protected policy file and its folders may have: SYSTEM, Administrators, TrustedInstaller. */
+export const TRUSTED_OWNER_SIDS = Object.freeze(["S-1-5-18", "S-1-5-32-544", "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"]);
+
+/** Built-in groups whose members can get around file ACLs or become admin (Windows). */
+export const ADMIN_EQUIVALENT_GROUP_SIDS: Readonly<Record<string, string>> = Object.freeze({
+  "S-1-5-32-548": "Account Operators",
+  "S-1-5-32-549": "Server Operators",
+  "S-1-5-32-550": "Print Operators",
+  "S-1-5-32-551": "Backup Operators",
+});
+
+/** One PowerShell line (stdin, no -EncodedCommand) that prints owner SID and reparse flag per path as JSON. */
+export function windowsOwnersScript(paths: readonly string[]): string {
+  const lit = (p: string) => `'${p.replace(/'/g, "''")}'`;
+  return (
+    `$out = foreach ($p in @(${paths.map(lit).join(", ")})) { try { $i = Get-Item -LiteralPath $p -Force -ErrorAction Stop; ` +
+    "$o = (Get-Acl -LiteralPath $p -ErrorAction Stop).GetOwner([System.Security.Principal.SecurityIdentifier]).Value; " +
+    "[pscustomobject]@{ path = $p; owner = $o; reparse = [bool]($i.Attributes -band [System.IO.FileAttributes]::ReparsePoint) } } " +
+    "catch { [pscustomobject]@{ path = $p; owner = $null; reparse = $false } } }; ConvertTo-Json -InputObject @($out) -Compress"
+  );
+}
+
+/** Parse the JSON windowsOwnersScript() prints; null when it is not that shape. */
+export function parseWindowsOwners(stdout: string): WindowsOwnerInfo[] | null {
+  let v: unknown;
+  try {
+    v = JSON.parse(stdout.trim());
+  } catch {
+    return null;
+  }
+  const list = Array.isArray(v) ? v : v && typeof v === "object" ? [v] : null;
+  if (!list) return null;
+  const out: WindowsOwnerInfo[] = [];
+  for (const x of list as Array<Record<string, unknown>>) {
+    if (!x || typeof x !== "object" || typeof x.path !== "string") return null;
+    out.push({ path: x.path, owner: typeof x.owner === "string" && /^S-1-[0-9-]+$/.test(x.owner) ? x.owner : null, reparse: x.reparse === true });
+  }
+  return out;
+}
 
 const REMOTE_PATHS_NOTE =
   "This check cannot see remote paths to admin: an SSH or Tailscale SSH key into root or an admin account, or an RMM API key " +
@@ -90,7 +156,25 @@ export function realProbes(): ProtectionProbes {
         stdout: r.stdout ?? "",
         stderr: r.stderr ?? "",
         ...(r.error ? { error: (r.error as NodeJS.ErrnoException).code ?? r.error.message } : {}),
+        ...(r.signal ? { signal: r.signal } : {}),
       };
+    },
+    readText(path) {
+      try {
+        return readFileSync(path, "utf8");
+      } catch {
+        return null;
+      }
+    },
+    windowsOwners(paths) {
+      const r = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "-"], {
+        input: windowsOwnersScript(paths) + "\r\n",
+        encoding: "utf8",
+        timeout: 15_000,
+        windowsHide: true,
+      });
+      if (r.error || r.status !== 0) return null;
+      return parseWindowsOwners(r.stdout ?? "");
     },
     getuid: () => (typeof process.getuid === "function" ? process.getuid() : undefined),
     canOpenForWrite(path) {
@@ -150,6 +234,15 @@ export function posixPart1(policyPath: string, probes: ProtectionProbes): Protec
   }
   const uid = probes.getuid();
   if (uid === 0) reasons.push("This process runs as root, so it can change the policy.");
+  if (probes.platform === "linux" && probes.readText) {
+    // Inside a user namespace (rootless podman, unshare -Ur) the owners this process sees can be forged.
+    const map = probes.readText("/proc/self/uid_map");
+    if (map === null) reasons.push("Cannot read /proc/self/uid_map, so a user namespace cannot be ruled out.");
+    else {
+      const norm = map.trim().split(/\s+/).join(" ");
+      if (norm !== IDENTITY_UID_MAP) reasons.push(`This process runs in a user namespace (uid_map "${norm.slice(0, 80)}"), where file owners can be forged.`);
+    }
+  }
   return { ok: reasons.length === 0, reasons };
 }
 
@@ -163,8 +256,28 @@ export function posixPart2(probes: ProtectionProbes): ProtectionPart {
   const reasons: string[] = [];
   for (const tool of ["sudo", "doas"] as const) {
     const r = probes.run(tool, ["-n", "true"]);
-    if (r.error === "ENOENT") continue;
-    if (r.status === 0) reasons.push(`Passwordless ${tool}: "${tool} -n true" succeeded (a NOPASSWD rule or a cached credential).`);
+    // Not installed, or not executable by this user (mode 4750): no path to root through it.
+    if (r.error === "ENOENT" || r.error === "EACCES") continue;
+    if (r.status === 0) {
+      reasons.push(`Passwordless ${tool}: "${tool} -n true" succeeded (a NOPASSWD rule or a cached credential).`);
+      continue;
+    }
+    if (r.status === null) {
+      // A timeout or a kill is not an answer (fail closed).
+      reasons.push(`Could not tell whether ${tool} needs a password: "${tool} -n true" ${r.error ? `failed (${r.error})` : `was killed${r.signal ? ` (${r.signal})` : ""}`}.`);
+      continue;
+    }
+    if (tool === "sudo") {
+      // "sudo -n true" only covers ALL-style rules. With the default listpw=any, "sudo -n -l" lists the
+      // rules without a password exactly when one of them is NOPASSWD (tee, vim, systemctl, ... reach root).
+      const l = probes.run("sudo", ["-n", "-l"]);
+      if (l.status === 0) {
+        const nopw = l.stdout.split(/\r?\n/).map((x) => x.trim()).filter((x) => /\bNOPASSWD\s*:/.test(x));
+        if (nopw.length) reasons.push(`sudo has NOPASSWD rule(s) for this user: ${nopw.slice(0, 3).join("; ")}${nopw.length > 3 ? ` (+${nopw.length - 3} more)` : ""}.`);
+      } else if (l.status === null && l.error !== "ENOENT" && l.error !== "EACCES") {
+        reasons.push(`Could not list this user's sudo rules: "sudo -n -l" ${l.error ? `failed (${l.error})` : "was killed"}.`);
+      }
+    }
   }
   const id = probes.run("id", ["-Gn"]);
   if (id.status !== 0) {
@@ -208,6 +321,17 @@ export function parseWhoamiGroups(stdout: string): WindowsGroupsInfo {
   return { isAdminMember, elevated, integrity };
 }
 
+/** Every SID in `whoami /groups /fo csv /nh` output. */
+export function parseWhoamiSids(stdout: string): string[] {
+  const out: string[] = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    const cols = [...line.matchAll(/"((?:[^"]|"")*)"/g)].map((m) => m[1]);
+    const sid = cols.find((c) => /^S-1-[0-9-]+$/.test(c));
+    if (sid) out.push(sid);
+  }
+  return out;
+}
+
 /** Parse `reg query <key>` output into name -> number for REG_DWORD values. */
 export function parseRegDwords(stdout: string): Record<string, number> {
   const out: Record<string, number> = {};
@@ -221,15 +345,31 @@ export function windowsPart1(policyPath: string, probes: ProtectionProbes): Prot
   const reasons: string[] = [];
   if (!probes.lstat(policyPath)) return { ok: false, reasons: [`No policy file at ${policyPath}.`] };
   if (probes.canOpenForWrite(policyPath)) reasons.push(`This user can open ${policyPath} for writing.`);
-  const programData = (probes.env.ProgramData ?? probes.env.PROGRAMDATA ?? "C:\\ProgramData").trim();
-  const top = win32.join(programData, "NightSquawk").toLowerCase();
+  const top = win32.join(programDataDir(probes.env), "NightSquawk").toLowerCase();
+  const chain = [policyPath];
   let dir = win32.dirname(policyPath);
   for (;;) {
+    chain.push(dir);
     if (probes.canCreateIn(dir)) reasons.push(`This user can create files in ${dir}.`);
     if (dir.toLowerCase() === top) break;
     const parent = win32.dirname(dir);
     if (parent === dir || !parent.toLowerCase().startsWith(top)) break;
     dir = parent;
+  }
+  // "Not writable right now" is not enough: an owner can always change the ACL back (attrib -R,
+  // removing a self-added deny entry). Every link must be owned by SYSTEM, Administrators or
+  // TrustedInstaller, and none may be a junction or symlink.
+  if (probes.windowsOwners) {
+    const owners = probes.windowsOwners(chain);
+    if (!owners) reasons.push("Could not read the owners of the policy file and its folders.");
+    else {
+      for (const p of chain) {
+        const info = owners.find((o) => o.path.toLowerCase() === p.toLowerCase());
+        if (!info || !info.owner) reasons.push(`Could not read the owner of ${p}.`);
+        else if (!TRUSTED_OWNER_SIDS.includes(info.owner)) reasons.push(`${p} is owned by ${info.owner}, not SYSTEM, Administrators or TrustedInstaller.`);
+        if (info?.reparse) reasons.push(`${p} is a junction or symbolic link.`);
+      }
+    }
   }
   return { ok: reasons.length === 0, reasons };
 }
@@ -240,6 +380,8 @@ export function windowsPart2(probes: ProtectionProbes, notes: string[]): Protect
   if (who.status !== 0) return { ok: false, reasons: ["Could not read this user's groups (whoami /groups failed)."] };
   const groups = parseWhoamiGroups(who.stdout);
   if (groups.elevated) reasons.push(`This process is elevated (integrity ${groups.integrity}).`);
+  const equivalent = [...new Set(parseWhoamiSids(who.stdout).filter((sid) => sid in ADMIN_EQUIVALENT_GROUP_SIDS).map((sid) => ADMIN_EQUIVALENT_GROUP_SIDS[sid]))];
+  if (equivalent.length) reasons.push(`Member of admin-equivalent group(s): ${equivalent.join(", ")}.`);
 
   const reg = probes.run("reg", ["query", UAC_KEY]);
   if (reg.status !== 0) {
@@ -277,6 +419,8 @@ export function checkProtection(policyPath: string, opts: { override: boolean; p
   if (probes.platform === "win32") {
     part1 = windowsPart1(policyPath, probes);
     part2 = windowsPart2(probes, notes);
+    const pd = programDataDir(probes.env);
+    if (pd.toLowerCase() !== DEFAULT_PROGRAM_DATA.toLowerCase()) notes.push(`ProgramData is ${pd}, not ${DEFAULT_PROGRAM_DATA}; the owner check still applies to every folder.`);
   } else {
     part1 = posixPart1(policyPath, probes);
     part2 = posixPart2(probes);

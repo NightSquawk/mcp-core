@@ -23,7 +23,8 @@ import { AuditLog, type AuditEntry, type AuditLine } from "./audit.js";
 import { Canaries, CANARY_SALT_ENV } from "./canaries.js";
 import { canonicalJson, deepFreeze, jsonClone, sha256Hex, utcDay } from "./canonical.js";
 import { computeEffective, readNarrowing, type Effective, type GroupState, type ServerCheckResult } from "./effective.js";
-import { IdempotencyStore, deriveKey, type IdemEntry } from "./idempotency.js";
+import { IdempotencyStateError, IdempotencyStore, MIN_KEY_LENGTH, deriveKey, type IdemEntry } from "./idempotency.js";
+import { LockTimeoutError } from "./lock.js";
 import { KillSwitch, type KillState } from "./kill-switch.js";
 import { Ledger, type LedgerSnapshot } from "./ledger.js";
 import { buildManifest, type GuardManifest } from "./manifest.js";
@@ -247,6 +248,9 @@ export class Guard<P extends BasePolicy = BasePolicy> {
 
   constructor(opts: GuardOptions<P>) {
     assertServerName(opts.server);
+    if (opts.idempotencyMaxLength !== undefined && !(Number.isInteger(opts.idempotencyMaxLength) && opts.idempotencyMaxLength >= MIN_KEY_LENGTH)) {
+      throw new Error(`idempotencyMaxLength must be an integer of at least ${MIN_KEY_LENGTH} (got ${opts.idempotencyMaxLength}).`);
+    }
     this.#opts = opts;
     this.server = opts.server;
     this.version = opts.version;
@@ -377,6 +381,26 @@ export class Guard<P extends BasePolicy = BasePolicy> {
       }
       return null;
     }
+  }
+
+  /** Record an idempotency outcome; never throws (the call may already have been sent). Returns a note when it failed. */
+  #finish(key: string, status: "done" | "pending" | "unknown" | "failed", result?: IdemEntry["result"]): string | null {
+    try {
+      this.idempotency.finish(key, status, result);
+      return null;
+    } catch (e) {
+      return `The idempotency store could not record this call as ${status}: ${this.redact(String((e as Error)?.message ?? e))}`;
+    }
+  }
+
+  /** A refusal for an unreadable idempotency store (fail closed), or rethrow anything else. */
+  #stateRefusal(e: unknown): Refusal {
+    if (e instanceof IdempotencyStateError || e instanceof LockTimeoutError) {
+      return refuse("state_unreadable", this.redact(e.message), {
+        how_to_enable: `A human inspects ${this.idempotency.file} (mcp-guard status), moves the bad file aside only after checking which calls it records, and retries.`,
+      });
+    }
+    throw e;
   }
 
   #refused(base: AuditEntry, refusal: Refusal, extra: Partial<AuditEntry> = {}): { status: "refused"; refusal: Refusal } {
@@ -588,8 +612,12 @@ export class Guard<P extends BasePolicy = BasePolicy> {
     const windowMs = this.#opts.idempotencyWindowMs ?? 10 * 60_000;
     const keyFor = (day: string) => deriveKey({ server: this.server, operation: op.operationId, canonicalBody, proposalDay: day, maxLength });
     const keyToday = keyFor(today);
-    const existing =
-      this.idempotency.lookup([keyToday], op.idempotencyKey ? {} : { windowMs }) ?? this.idempotency.lookup([keyFor(yesterday)], { windowMs });
+    let existing: IdemEntry | null;
+    try {
+      existing = this.idempotency.lookup([keyToday], op.idempotencyKey ? {} : { windowMs }) ?? this.idempotency.lookup([keyFor(yesterday)], { windowMs });
+    } catch (e) {
+      return this.#refused(base, this.#stateRefusal(e));
+    }
     const key = existing && existing.status === "unknown" ? existing.key : keyToday;
     base.idempotency_key = key;
 
@@ -652,9 +680,20 @@ export class Guard<P extends BasePolicy = BasePolicy> {
 
     // Claim the key before asking anyone.
     if (existing && existing.status === "unknown") {
-      if (!this.idempotency.reclaimUnknown(key)) return this.#refused(base, refuse("in_flight", "The same request was just claimed by another call."));
+      let reclaimed: boolean;
+      try {
+        reclaimed = this.idempotency.reclaimUnknown(key);
+      } catch (e) {
+        return this.#refused(base, this.#stateRefusal(e));
+      }
+      if (!reclaimed) return this.#refused(base, refuse("in_flight", "The same request was just claimed by another call."));
     } else {
-      const claim = this.idempotency.begin(key, { operation: op.operationId, request_hash: requestHash, day: today }, op.idempotencyKey ? {} : { windowMs });
+      let claim: ReturnType<IdempotencyStore["begin"]>;
+      try {
+        claim = this.idempotency.begin(key, { operation: op.operationId, request_hash: requestHash, day: today }, op.idempotencyKey ? {} : { windowMs });
+      } catch (e) {
+        return this.#refused(base, this.#stateRefusal(e));
+      }
       if (!claim.claimed) {
         const e = claim.existing;
         if (e.status === "done" || e.status === "pending") return dedup(e);
@@ -662,7 +701,7 @@ export class Guard<P extends BasePolicy = BasePolicy> {
         return this.#refused(base, refuse("outcome_unknown", `An identical request at ${e.created_at} has an unknown outcome.`));
       }
     }
-    const release = () => this.idempotency.finish(key, "failed");
+    const release = () => void this.#finish(key, "failed");
 
     // 6. Approval.
     const proposal = buildProposal({ server: this.server, operation: op, group, mode: this.mode, extraction, requestHash, idempotencyKey: key, policyHash: this.loaded.hash, reason: input.reason, now });
@@ -680,8 +719,8 @@ export class Guard<P extends BasePolicy = BasePolicy> {
       return this.#refused(base, refuse("approval_denied", decision.reason));
     }
     if (decision.result === "pending") {
-      this.idempotency.finish(key, "pending", { pending: { ref: decision.ref, ...(decision.url ? { url: decision.url } : {}) } });
-      this.#write({ ...base, decision: "pending", note: decision.message });
+      const stateNote = this.#finish(key, "pending", { pending: { ref: decision.ref, ...(decision.url ? { url: decision.url } : {}) } });
+      this.#write({ ...base, decision: "pending", note: [decision.message, stateNote].filter(Boolean).join(" ") || undefined });
       return {
         status: "pending",
         operation: op.operationId,
@@ -743,9 +782,9 @@ export class Guard<P extends BasePolicy = BasePolicy> {
       const rejected = !res.sent || (res.status !== undefined && res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 409);
       const error = this.redactValue(res.error);
       if (rejected) {
-        this.idempotency.finish(key, "failed", { http_status: res.status ?? null });
+        const stateNote = this.#finish(key, "failed", { http_status: res.status ?? null });
         this.ledger.settle(reservation.id, "failed");
-        this.#write({ ...base, decision: "failed", http_status: res.status ?? null, duration_ms });
+        this.#write({ ...base, decision: "failed", http_status: res.status ?? null, duration_ms, ...(stateNote ? { note: stateNote } : {}) });
         return {
           status: "failed",
           operation: op.operationId,
@@ -755,9 +794,9 @@ export class Guard<P extends BasePolicy = BasePolicy> {
           message: res.sent ? "The provider rejected the request; nothing was done." : "The request was not sent.",
         };
       }
-      this.idempotency.finish(key, "unknown", { http_status: res.status ?? null });
+      const stateNote = this.#finish(key, "unknown", { http_status: res.status ?? null });
       this.ledger.settle(reservation.id, "unknown");
-      this.#write({ ...base, decision: "unknown_outcome", http_status: res.status ?? null, duration_ms });
+      this.#write({ ...base, decision: "unknown_outcome", http_status: res.status ?? null, duration_ms, ...(stateNote ? { note: stateNote } : {}) });
       return {
         status: "unknown_outcome",
         operation: op.operationId,
@@ -790,7 +829,8 @@ export class Guard<P extends BasePolicy = BasePolicy> {
       ...(stored !== undefined && stored.length <= DEDUP_DATA_CHARS ? { data } : {}),
       ...(hold.held ? { pending: { ref: hold.ref, status: hold.status, url: hold.url } } : {}),
     };
-    this.idempotency.finish(key, hold.held ? "pending" : "done", result);
+    const stateNote = this.#finish(key, hold.held ? "pending" : "done", result);
+    if (stateNote) warnings.push(stateNote);
     this.ledger.settle(reservation.id, hold.held ? "pending" : "done");
     this.#write({ ...base, decision: hold.held ? "pending" : "executed", http_status: res.status ?? null, provider_ids: providerIds, duration_ms, ...(warnings.length ? { note: warnings.join(" ") } : {}) });
 
