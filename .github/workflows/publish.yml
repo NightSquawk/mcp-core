@@ -13,17 +13,27 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # A release waits for a reviewer. Set up before merging this (GitHub creates a missing
+    # environment on first use with no protection rules): Settings > Environments > npm-publish,
+    # with required reviewers, "Prevent self-review" on, and deployments limited to tags v*.
+    # Then name the environment in the package's npm trusted publisher settings.
+    environment: npm-publish
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
 
-      - run: npm ci
+      # This job can mint an npm publish token, so no dependency install scripts run in it.
+      - run: npm ci --ignore-scripts
 
       - run: npm run build
+
+      - run: node scripts/run-tests.mjs
 
       # Guard: the tag must match package.json version (v1.2.3 -> 1.2.3)
       - name: Check tag matches package version
