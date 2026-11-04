@@ -496,6 +496,28 @@ describe("steps 7-8: pre-image and execute-time re-checks", () => {
     assert.equal(failed.error.echo.password, "[redacted]");
   });
 
+  test("request-only names mask requests, not answers; notSecretKeys shows ids", async (t) => {
+    // Proxmox: `data` holds ACME plugin credentials in a request and wraps every answer;
+    // `tokens` is a list of API token ids an ACL change grants a role to.
+    const { guard, sb } = mk(t, { guard: { redactRequestKeys: ["data"], notSecretKeys: ["tokens"] } });
+    const body = { data: "CF_Token=abc123secret", tokens: ["root@pam!ci"], token: "t0k3n-value" };
+    const masked = { data: "[redacted]", tokens: ["root@pam!ci"], token: "[redacted]" };
+    const dry = await exec(guard, "thing_delete", { pathParams: { id: "a" }, body }, { dryRun: true });
+    assert.deepEqual(dry.preview.request.body, masked);
+    const fetchCurrent = async () => ({ data: { id: "acme1", api: "cf" } });
+    assert.equal(code(await exec(guard, "thing_delete", { pathParams: { id: "a" }, body }, { hooks: { fetchCurrent } })), "done");
+    const dir = join(sb.stateDir, "preimages");
+    const [file] = readdirSync(dir);
+    const raw = readFileSync(join(dir, file), "utf8");
+    const saved = JSON.parse(raw);
+    assert.deepEqual(saved.request.body, masked);
+    assert.deepEqual(saved.current, { data: { id: "acme1", api: "cf" } }, "the answer's data wrapper is kept");
+    for (const s of ["abc123secret", "t0k3n-value"]) assert.ok(!raw.includes(s), s);
+    const error = { message: "bad", errors: { data: "value does not match the regex pattern" }, data: { x: 1 } };
+    const failed = await exec(guard, "thing_create", { body: { name: "vm2" } }, { handler: stub(() => ({ ok: false, status: 400, error, sent: true })) });
+    assert.deepEqual(failed.error, error, "an error is an answer: request-only names stay");
+  });
+
   test("a failed pre-image refuses and releases", async (t) => {
     const { guard } = mk(t);
     const fetchCurrent = async () => {

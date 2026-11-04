@@ -68,20 +68,45 @@ function normalizeKey(key: string): string {
   return String(key).toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
-/**
- * True when a key's value is a credential whatever it looks like (section 7.4):
- * value patterns cannot catch an arbitrary password, so the key name decides.
- * A trailing "s" is ignored (`secrets`, `tokens`). `extra` adds exact names.
- */
-export function isSensitiveKey(key: string, extra: readonly string[] = []): boolean {
-  const k = normalizeKey(key);
-  if (!k) return false;
+/** The built-in rule on a normalized key. A trailing "s" is ignored (`secrets`, `tokens`). */
+function builtInSensitive(k: string): boolean {
   const forms = k.length > 1 && k.endsWith("s") ? [k, k.slice(0, -1)] : [k];
   for (const f of forms) {
     if (SENSITIVE_KEY_NAMES.includes(f)) return true;
     for (const s of SENSITIVE_KEY_SUFFIXES) if (f.endsWith(s)) return true;
   }
-  return extra.some((e) => normalizeKey(e) === k);
+  return false;
+}
+
+/** A name a notSecretKeys list may not hold: a built-in name or ending on its own (`token`, `api_key`), which would unmask every key that ends with it. */
+export function isBuiltInCredentialName(name: string): boolean {
+  const k = normalizeKey(name);
+  return SENSITIVE_KEY_NAMES.includes(k) || SENSITIVE_KEY_SUFFIXES.includes(k);
+}
+
+/**
+ * True when a key's value is a credential whatever it looks like (section 7.4):
+ * value patterns cannot catch an arbitrary password, so the key name decides.
+ * `extra` adds exact names. `notSecret` takes exact names back out of the built-in
+ * rule, for ids an API names like credentials (Proxmox's `tokens`, a list of API
+ * token ids); a name in `extra` stays masked even when `notSecret` lists it too.
+ * All names are compared after normalizeKey().
+ */
+export function isSensitiveKey(key: string, extra: readonly string[] = [], notSecret: readonly string[] = []): boolean {
+  return keyRule(extra, notSecret)(key);
+}
+
+/** isSensitiveKey() with its name lists normalized once, for walks over many keys. */
+function keyRule(extra: readonly string[], notSecret: readonly string[]): (key: string) => boolean {
+  const add = new Set(extra.map(normalizeKey));
+  const keep = new Set(notSecret.map(normalizeKey));
+  return (key) => {
+    const k = normalizeKey(key);
+    if (!k) return false;
+    if (add.has(k)) return true;
+    if (keep.has(k)) return false;
+    return builtInSensitive(k);
+  };
 }
 
 /**
@@ -92,8 +117,11 @@ export function isSensitiveKey(key: string, extra: readonly string[] = []): bool
  * appear. For request bodies in dry-run output and for pre-image files, where the
  * value patterns of redactValue() would miss an arbitrary password.
  */
-export function redactSensitiveKeys<T>(value: T, opts: { extraKeys?: readonly string[]; secrets?: readonly string[] } = {}): T {
-  const extra = opts.extraKeys ?? [];
+export function redactSensitiveKeys<T>(
+  value: T,
+  opts: { extraKeys?: readonly string[]; notSecretKeys?: readonly string[]; secrets?: readonly string[] } = {}
+): T {
+  const sensitive = keyRule(opts.extraKeys ?? [], opts.notSecretKeys ?? []);
   const secrets = [...(opts.secrets ?? [])].filter(Boolean).sort((a, b) => b.length - a.length);
   const mask = (s: string): string => {
     let out = s;
@@ -109,7 +137,7 @@ export function redactSensitiveKeys<T>(value: T, opts: { extraKeys?: readonly st
     return Object.fromEntries(
       Object.entries(v as Record<string, unknown>).map(([k, x]) => [
         secrets.length ? mask(k) : k,
-        isSensitiveKey(k, extra) && x !== null && x !== undefined && typeof x !== "boolean" ? "[redacted]" : walk(x, depth + 1),
+        sensitive(k) && x !== null && x !== undefined && typeof x !== "boolean" ? "[redacted]" : walk(x, depth + 1),
       ])
     );
   };

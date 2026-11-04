@@ -31,7 +31,7 @@ import { buildManifest, type GuardManifest } from "./manifest.js";
 import { killMarkers, stateDir as defaultStateDir, assertServerName } from "./paths.js";
 import { approverFor, basePolicySchema, loadPolicy, type ApproverName, type BasePolicy, type LoadedPolicy } from "./policy.js";
 import { checkProtection, type ProtectionProbes, type ProtectionReport } from "./protection.js";
-import { createRedactor, redactSensitiveKeys, redactValue, type RedactRule, type Redactor } from "./redact.js";
+import { createRedactor, isBuiltInCredentialName, redactSensitiveKeys, redactValue, type RedactRule, type Redactor } from "./redact.js";
 import { isRefusal, refuse, type Refusal } from "./refusal.js";
 import { labelUntrustedFields, sanitizeDeep, untrustedTexts } from "./sanitize.js";
 import { SessionState, trustedLeaves, type TaintState } from "./session.js";
@@ -221,11 +221,25 @@ export interface GuardOptions<P extends BasePolicy = BasePolicy> {
   secrets?: () => readonly string[];
   redactRules?: readonly RedactRule[];
   /**
-   * Extra body keys whose values are credentials, on top of the built-in names
-   * (password, secret, token, key, ...; see isSensitiveKey). Masked in dry-run output,
-   * errors and pre-image files.
+   * Extra key names whose values are credentials, on top of the built-in names
+   * (password, secret, token, key, ...; see isSensitiveKey). Masked at any depth in
+   * dry-run output, errors and pre-image files.
    */
   redactKeys?: readonly string[];
+  /**
+   * Key names masked only inside a request: the request a dry run shows and the one a
+   * pre-image stores. Not in errors, and not in the pre-image's current state. For a
+   * parameter whose name the provider also uses for other data, such as Proxmox's
+   * `data` (ACME plugin credentials in a request, the wrapper of every answer).
+   */
+  redactRequestKeys?: readonly string[];
+  /**
+   * Key names the built-in rule masks that hold no secret in this API, such as
+   * Proxmox's `tokens` (API token ids) or `lock-token`. Exact names; a name in
+   * redactKeys or redactRequestKeys stays masked. A built-in name or ending on its own
+   * (`token`, `api_key`) is refused, because it would unmask every key ending in it.
+   */
+  notSecretKeys?: readonly string[];
   clock?: () => Date;
   /** A precomputed protection report (tests); otherwise the OS check runs. */
   protection?: ProtectionReport;
@@ -284,6 +298,12 @@ export class Guard<P extends BasePolicy = BasePolicy> {
     if (opts.idempotencyMaxLength !== undefined && !(Number.isInteger(opts.idempotencyMaxLength) && opts.idempotencyMaxLength >= MIN_KEY_LENGTH)) {
       throw new Error(`idempotencyMaxLength must be an integer of at least ${MIN_KEY_LENGTH} (got ${opts.idempotencyMaxLength}).`);
     }
+    const tooBroad = (opts.notSecretKeys ?? []).filter(isBuiltInCredentialName);
+    if (tooBroad.length) {
+      throw new Error(
+        `notSecretKeys cannot hold a built-in credential name (${tooBroad.map((n) => JSON.stringify(n)).join(", ")}): it would unmask every key ending in it. Name the exact key instead, such as "lock-token".`
+      );
+    }
     this.#opts = opts;
     this.server = opts.server;
     this.version = opts.version;
@@ -341,9 +361,20 @@ export class Guard<P extends BasePolicy = BasePolicy> {
     return redactValue(value, this.#secrets(), this.#redactor);
   }
 
-  /** redactValue() plus credential-named keys (7.4): for requests and errors the guard shows or stores. */
+  /** The credential-key rule (7.4) for provider data: errors and a pre-image's current state. */
+  #keyRule(): { extraKeys: readonly string[]; notSecretKeys: readonly string[] } {
+    return { extraKeys: this.#opts.redactKeys ?? [], notSecretKeys: this.#opts.notSecretKeys ?? [] };
+  }
+
+  /** redactValue() plus credential-named keys: for errors the guard shows. */
   #redactOut<T>(value: T): T {
-    return this.redactValue(redactSensitiveKeys(value, { extraKeys: this.#opts.redactKeys ?? [] }));
+    return this.redactValue(redactSensitiveKeys(value, this.#keyRule()));
+  }
+
+  /** #redactOut() plus the request-only names: for a request the guard shows or stores. */
+  #redactRequest<T>(request: T): T {
+    const rule = this.#keyRule();
+    return this.redactValue(redactSensitiveKeys(request, { ...rule, extraKeys: [...rule.extraKeys, ...(this.#opts.redactRequestKeys ?? [])] }));
   }
 
   /**
@@ -755,7 +786,7 @@ export class Guard<P extends BasePolicy = BasePolicy> {
         tier: op.tier,
         group,
         mode: this.mode,
-        request: this.#redactOut(jsonClone(request)),
+        request: this.#redactRequest(jsonClone(request)),
         ...(typeof extraction.amount_cents === "number" ? { amount_cents: extraction.amount_cents } : {}),
         ...(extraction.currency ? { currency: extraction.currency } : {}),
         targets: this.redactValue(targets.map((t) => ({ ...t }))),
@@ -981,23 +1012,23 @@ export class Guard<P extends BasePolicy = BasePolicy> {
 
   /**
    * The pre-image file (0600 in a 0700 folder). The request is stored as the guard
-   * shows it (secrets, value patterns and credential-named keys masked). `current`
-   * keeps its values, account numbers included, so the change can be reviewed or
-   * undone; only credential-named keys and the configured secrets are masked in it.
+   * shows it (secrets, value patterns, credential-named keys and redactRequestKeys
+   * masked). `current` keeps its values, account numbers included, so the change can
+   * be reviewed or undone; only credential-named keys (redactKeys included, request-only
+   * names not) and the configured secrets are masked in it.
    */
   #savePreimage(op: OperationRef, key: string, request: GuardRequest, current: unknown): void {
     const dir = join(this.stateDir, "preimages");
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const stamp = this.#clock().toISOString().replace(/[:.]/g, "-");
     const file = join(dir, `${stamp}-${op.operationId.replace(/[^A-Za-z0-9_-]/g, "_")}-${key.slice(-12)}.json`);
-    const extraKeys = this.#opts.redactKeys ?? [];
     const record = {
       operation: op.operationId,
       tier: op.tier,
-      request: this.#redactOut(request),
+      request: this.#redactRequest(request),
       idempotency_key: key,
       saved_at: this.#clock().toISOString(),
-      current: redactSensitiveKeys(current, { extraKeys, secrets: this.#secrets() }),
+      current: redactSensitiveKeys(current, { ...this.#keyRule(), secrets: this.#secrets() }),
     };
     writeFileSync(file, JSON.stringify(record, null, 2), { mode: 0o600 });
   }

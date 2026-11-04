@@ -472,3 +472,21 @@ test("credential keys are masked by name, whatever their value looks like", asyn
   assert.equal(isSensitiveKey(`${"x".repeat(400_000)}_password`), true);
   assert.ok(performance.now() - t0 < 2_000, "linear in the key length");
 });
+
+test("notSecretKeys takes exact names out of the built-in rule; an added name stays masked", async () => {
+  const { isBuiltInCredentialName, isSensitiveKey, redactSensitiveKeys } = await import("../dist/guard/index.js");
+  assert.equal(isSensitiveKey("tokens"), true);
+  assert.equal(isSensitiveKey("tokens", [], ["tokens"]), false);
+  assert.equal(isSensitiveKey("lock-token", [], ["lock_token"]), false, "names match after normalizing");
+  assert.equal(isSensitiveKey("access_token", [], ["lock-token"]), true, "only the exact name is exempt");
+  assert.equal(isSensitiveKey("tokens", ["tokens"], ["tokens"]), true, "an added name wins");
+  for (const n of ["token", "API_KEY", "password", "key", "Secret", "private-key"]) assert.equal(isBuiltInCredentialName(n), true, n);
+  for (const n of ["tokens", "lock-token", "keys", "data", ""]) assert.equal(isBuiltInCredentialName(n), false, n);
+  const out = redactSensitiveKeys({ tokens: ["root@pam!ci"], "lock-token": "abc", nested: { tokens: "x", token: "y" } }, { notSecretKeys: ["tokens", "lock-token"] });
+  assert.deepEqual(out, { tokens: ["root@pam!ci"], "lock-token": "abc", nested: { tokens: "x", token: "[redacted]" } });
+});
+
+test("createGuard: notSecretKeys refuses a built-in credential name", (t) => {
+  assert.throws(() => mk(t, manualClock(), { notSecretKeys: ["tokens", "api-key", "TOKEN"] }), /notSecretKeys cannot hold a built-in credential name \("api-key", "TOKEN"\)/);
+  assert.ok(mk(t, manualClock(), { notSecretKeys: ["tokens", "lock-token"] }).guard);
+});
