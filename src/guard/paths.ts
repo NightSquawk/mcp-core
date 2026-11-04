@@ -25,13 +25,19 @@ export const DEFAULT_PROGRAM_DATA = "C:\\ProgramData";
 
 /**
  * Windows ProgramData from the environment. A blank or non drive-absolute value
- * (which would resolve against the working folder) falls back to C:\ProgramData.
- * The protection check verifies owners, so a redirected value cannot make a
- * user-owned folder count as protected.
+ * (which would resolve against the working folder), or one holding a control
+ * character or line separator, falls back to C:\ProgramData. The protection check
+ * verifies owners, so a redirected value cannot make a user-owned folder count as
+ * protected.
  */
 export function programDataDir(env: NodeJS.ProcessEnv): string {
   const raw = (env.ProgramData ?? "").trim() || (env.PROGRAMDATA ?? "").trim();
-  return /^[A-Za-z]:[\\/]/.test(raw) ? raw : DEFAULT_PROGRAM_DATA;
+  if (!/^[A-Za-z]:[\\/]/.test(raw)) return DEFAULT_PROGRAM_DATA;
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw.charCodeAt(i);
+    if (c < 0x20 || (c >= 0x7f && c <= 0x9f) || c === 0x2028 || c === 0x2029) return DEFAULT_PROGRAM_DATA;
+  }
+  return raw;
 }
 
 /** The directory holding every server's policy folder, and whether it is the test override. */

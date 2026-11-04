@@ -11,6 +11,7 @@ import {
   checkProtection,
   createGuard,
   deriveKey,
+  hasUnsafePathChar,
   IDENTITY_UID_MAP,
   Ledger,
   loadPolicy,
@@ -18,6 +19,9 @@ import {
   parseWindowsOwners,
   posixPart1,
   posixPart2,
+  POWERSHELL_SINGLE_QUOTES,
+  programDataDir,
+  psSingleQuoted,
   realProbes,
   refuse,
   staticProtection,
@@ -362,4 +366,48 @@ test("realProbes: has the user-namespace and owner probes, and readText fails so
   assert.equal(typeof p.windowsOwners, "function");
   assert.equal(p.readText(join("/nonexistent-dir-for-test", "x")), null);
   if (process.platform === "linux") assert.notEqual(p.readText("/proc/self/uid_map"), null);
+});
+
+test("psSingleQuoted doubles every PowerShell quote character, so a path cannot leave the literal", () => {
+  assert.deepEqual([...POWERSHELL_SINGLE_QUOTES], [0x27, 0x2018, 0x2019, 0x201a, 0x201b]);
+  for (const cp of POWERSHELL_SINGLE_QUOTES) {
+    const q = String.fromCharCode(cp);
+    assert.equal(psSingleQuoted(`C:\\a${q}b`), `'C:\\a${q}${q}b'`, `U+${cp.toString(16)}`);
+  }
+  // A breakout attempt: close the literal with U+2019, run a command, reopen with U+2018.
+  const open = String.fromCharCode(0x2018);
+  const close = String.fromCharCode(0x2019);
+  const evil = `C:\\x${close}; Write-Output pwned; ${open}`;
+  const script = windowsOwnersScript([evil]);
+  assert.ok(script.includes(`'C:\\x${close}${close}; Write-Output pwned; ${open}${open}'`), script);
+  // Every quote character in the literal is paired, so the literal ends only at the final ASCII quote.
+  const lit = psSingleQuoted(evil).slice(1, -1);
+  let i = 0;
+  while (i < lit.length) {
+    const c = lit.charCodeAt(i);
+    if (POWERSHELL_SINGLE_QUOTES.includes(c)) {
+      assert.equal(lit.charCodeAt(i + 1), c, `unpaired quote at ${i}`);
+      i += 2;
+    } else i += 1;
+  }
+});
+
+test("hasUnsafePathChar: controls and line separators are refused; psSingleQuoted throws; the owner probe fails closed", () => {
+  for (const cp of [0x00, 0x09, 0x0a, 0x0d, 0x1f, 0x7f, 0x85, 0x9f, 0x2028, 0x2029]) {
+    const p = `C:\\a${String.fromCharCode(cp)}b`;
+    assert.equal(hasUnsafePathChar(p), true, `U+${cp.toString(16)}`);
+    assert.throws(() => psSingleQuoted(p), RangeError);
+    assert.throws(() => windowsOwnersScript([p]), RangeError);
+  }
+  for (const ok of ["C:\\ProgramData\\NightSquawk", "C:\\it's here", `C:\\caf${String.fromCharCode(0xe9)}`, "D:/x y/z"]) assert.equal(hasUnsafePathChar(ok), false, ok);
+  const cr = `C:\\ProgramData${String.fromCharCode(13)}Write-Output S-1-5-18`;
+  assert.equal(realProbes().windowsOwners([cr]), null);
+});
+
+test("programDataDir: a value holding a control character or line separator falls back to the default", () => {
+  for (const cp of [0x0a, 0x0d, 0x00, 0x85, 0x2028]) {
+    assert.equal(programDataDir({ ProgramData: `C:\\Users\\me${String.fromCharCode(cp)}x` }), "C:\\ProgramData", `U+${cp.toString(16)}`);
+  }
+  const q = String.fromCharCode(0x2019);
+  assert.equal(programDataDir({ ProgramData: `C:\\Users\\o${q}brien` }), `C:\\Users\\o${q}brien`, "a quote character is quoted later, not refused here");
 });

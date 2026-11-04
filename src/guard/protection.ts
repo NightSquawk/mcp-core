@@ -97,11 +97,44 @@ export const ADMIN_EQUIVALENT_GROUP_SIDS: Readonly<Record<string, string>> = Obj
   "S-1-5-32-551": "Backup Operators",
 });
 
+/**
+ * Every character PowerShell ends a single-quoted string at (CharExtensions.IsSingleQuote):
+ * the ASCII apostrophe and U+2018, U+2019, U+201A, U+201B. Doubling only the ASCII one lets
+ * a path holding a curly quote break out of the literal and run code.
+ */
+export const POWERSHELL_SINGLE_QUOTES: readonly number[] = Object.freeze([0x27, 0x2018, 0x2019, 0x201a, 0x201b]);
+
+/**
+ * True when a path holds a character no real path needs and a stdin script cannot carry:
+ * C0 and C1 controls (CR or LF would split the script into lines), DEL, U+2028 and U+2029.
+ */
+export function hasUnsafePathChar(path: string): boolean {
+  for (let i = 0; i < path.length; i++) {
+    const c = path.charCodeAt(i);
+    if (c < 0x20 || (c >= 0x7f && c <= 0x9f) || c === 0x2028 || c === 0x2029) return true;
+  }
+  return false;
+}
+
+/**
+ * A PowerShell single-quoted literal, every quote character doubled the way
+ * CodeGeneration.EscapeSingleQuotedStringContent does it. Throws on a path
+ * hasUnsafePathChar() rejects; callers check first and fail closed.
+ */
+export function psSingleQuoted(text: string): string {
+  if (hasUnsafePathChar(text)) throw new RangeError("A PowerShell literal cannot hold control characters or line separators.");
+  let out = "'";
+  for (const ch of text) {
+    out += ch;
+    if (POWERSHELL_SINGLE_QUOTES.includes(ch.charCodeAt(0))) out += ch;
+  }
+  return out + "'";
+}
+
 /** One PowerShell line (stdin, no -EncodedCommand) that prints owner SID and reparse flag per path as JSON. */
 export function windowsOwnersScript(paths: readonly string[]): string {
-  const lit = (p: string) => `'${p.replace(/'/g, "''")}'`;
   return (
-    `$out = foreach ($p in @(${paths.map(lit).join(", ")})) { try { $i = Get-Item -LiteralPath $p -Force -ErrorAction Stop; ` +
+    `$out = foreach ($p in @(${paths.map(psSingleQuoted).join(", ")})) { try { $i = Get-Item -LiteralPath $p -Force -ErrorAction Stop; ` +
     "$o = (Get-Acl -LiteralPath $p -ErrorAction Stop).GetOwner([System.Security.Principal.SecurityIdentifier]).Value; " +
     "[pscustomobject]@{ path = $p; owner = $o; reparse = [bool]($i.Attributes -band [System.IO.FileAttributes]::ReparsePoint) } } " +
     "catch { [pscustomobject]@{ path = $p; owner = $null; reparse = $false } } }; ConvertTo-Json -InputObject @($out) -Compress"
@@ -167,6 +200,8 @@ export function realProbes(): ProtectionProbes {
       }
     },
     windowsOwners(paths) {
+      // Fail closed without starting PowerShell: such a path cannot be quoted onto one stdin line.
+      if (paths.some(hasUnsafePathChar)) return null;
       const r = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "-"], {
         input: windowsOwnersScript(paths) + "\r\n",
         encoding: "utf8",
