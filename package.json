@@ -22,6 +22,9 @@
       "default": "./dist/guard/testing/index.js"
     }
   },
+  "bin": {
+    "mcp-guard": "dist/cli/index.js"
+  },
   "files": [
     "dist",
     "README.md",
