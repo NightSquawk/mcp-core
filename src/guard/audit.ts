@@ -100,7 +100,10 @@ export class AuditLog {
     const now = this.#clock();
     const month = utcMonth(now);
     const file = this.fileFor(month);
-    const clean = redactValue(entry, this.#secrets(), this.#redact) as AuditEntry;
+    const clean = redactValue(entry, this.#secrets(), this.#redact);
+    if (!clean || typeof clean !== "object" || Array.isArray(clean) || typeof clean.operation !== "string") {
+      throw new Error("AuditLog.append: the entry must be an object with an operation.");
+    }
     return withFileLock(join(this.dir, "audit.lock"), () => {
       const prev = this.#lastHash(file) ?? genesis(this.server, month);
       const body: Omit<AuditLine, "hash"> = { v: 1, ts: now.toISOString(), pid: process.pid, ...clean, prev };

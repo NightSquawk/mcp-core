@@ -40,13 +40,34 @@ export function createRedactor(extra: readonly RedactRule[] = []): Redactor {
 /** Mask secrets in `text` with the shared patterns. */
 export const redact: Redactor = createRedactor();
 
-/** redact() for a JSON value, keeping its shape where it can. */
-export function redactValue<T>(value: T, secrets: readonly string[] = [], redactor: Redactor = redact): T | string {
-  if (value === undefined) return value;
-  const masked = redactor(JSON.stringify(value), secrets);
-  try {
-    return JSON.parse(masked) as T;
-  } catch {
-    return masked;
-  }
+/** Keys whose values are account, routing or card numbers even when the provider sends them as JSON numbers. */
+export const SENSITIVE_NUMBER_KEYS = /(^|_)(account|routing|card|aba)_?(number|num|no)$|^(iban|pan|aba)$/i;
+
+function lastFour(value: string | number): string {
+  const digits = String(value).replace(/\D/g, "");
+  return digits.length > 4 ? `****${digits.slice(-4)}` : String(value);
+}
+
+/**
+ * redact() for a JSON value. String leaves and object keys go through the
+ * redactor; numbers, booleans and the structure are kept, so an amount such as
+ * 12345678 cents is never mistaken for an account number. Values under
+ * SENSITIVE_NUMBER_KEYS keep only their last 4 digits whatever their type.
+ */
+export function redactValue<T>(value: T, secrets: readonly string[] = [], redactor: Redactor = redact): T {
+  const walk = (v: unknown, key: string | null, depth: number): unknown => {
+    if (key !== null && SENSITIVE_NUMBER_KEYS.test(key) && (typeof v === "number" || typeof v === "string")) {
+      return redactor(lastFour(v), secrets);
+    }
+    if (typeof v === "string") return redactor(v, secrets);
+    if (v === null || typeof v !== "object") return v;
+    if (depth > 64) return "[too deep]";
+    if (Array.isArray(v)) return v.map((x) => walk(x, key, depth + 1));
+    if (typeof (v as { toJSON?: unknown }).toJSON === "function") {
+      const plain: unknown = JSON.parse(JSON.stringify(v) ?? "null");
+      return plain !== null && typeof plain === "object" ? walk(plain, key, depth + 1) : walk(plain, key, depth);
+    }
+    return Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [redactor(k, secrets), walk(x, k, depth + 1)]));
+  };
+  return walk(value, null, 0) as T;
 }

@@ -10,17 +10,17 @@ const ANSI_OSC = /\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)?/g;
 const ANSI_CSI = /(?:\u001b\[|\u009b)[0-?]*[ -/]*[@-~]/g;
 const ANSI_OTHER = /\u001b[@-Z\\-_]/g;
 const CONTROLS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
-// Zero-width and invisible format characters.
-const ZERO_WIDTH = /[​-‍⁠﻿᠎­]/g;
+// Zero-width and invisible format characters: U+200B-U+200D, U+2060, U+FEFF, U+180E, U+00AD.
+const ZERO_WIDTH = /[\u200b-\u200d\u2060\ufeff\u180e\u00ad]/g;
 // Invisible operators U+2061-U+2064.
-const INVISIBLE_OPS = /[⁡-⁤]/g;
-// Bidi controls: LRM/RLM/ALM, embeddings/overrides, isolates.
-const BIDI = /[‎‏؜‪-‮⁦-⁩]/g;
-// Variation selectors (BMP and supplementary).
-const VS_BMP = /[︀-️]/g;
-const VS_SUPP = /\udb40[\udd00-\uddef]/g; // U+E0100-E01EF
-// Unicode tag characters U+E0000-E007F (surrogate pairs 󠀀-󠁿).
-const TAGS = /\udb40[\udc00-\udc7f]/g;
+const INVISIBLE_OPS = /[\u2061-\u2064]/g;
+// Bidi controls: LRM/RLM U+200E-U+200F, ALM U+061C, embeddings/overrides U+202A-U+202E, isolates U+2066-U+2069.
+const BIDI = /[\u200e\u200f\u061c\u202a-\u202e\u2066-\u2069]/g;
+// Variation selectors: BMP U+FE00-U+FE0F, supplementary U+E0100-U+E01EF.
+const VS_BMP = /[\ufe00-\ufe0f]/g;
+const VS_SUPP = /[\u{E0100}-\u{E01EF}]/gu;
+// Unicode tag characters U+E0000-U+E007F.
+const TAGS = /[\u{E0000}-\u{E007F}]/gu;
 // Unpaired surrogates.
 const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
 

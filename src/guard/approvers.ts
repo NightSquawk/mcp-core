@@ -86,7 +86,7 @@ export function agentSays(reason: string | undefined): string | undefined {
   if (reason === undefined) return undefined;
   const clean = sanitizeUntrusted(reason).replace(/\s+/g, " ").trim();
   if (!clean) return undefined;
-  return clean.length > AGENT_SAYS_MAX ? `${clean.slice(0, AGENT_SAYS_MAX - 1)}…` : clean;
+  return clean.length > AGENT_SAYS_MAX ? `${clean.slice(0, AGENT_SAYS_MAX - 3)}...` : clean;
 }
 
 export function buildProposal(input: ProposalInput): Proposal {
