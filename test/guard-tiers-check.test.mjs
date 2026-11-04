@@ -35,6 +35,14 @@ describe("checkTiers", () => {
     assert.equal(checkTiers({ operations: SPEC.slice(0, 7), tiers, allowExtra: true }).issues.some((i) => i.code === "extra"), false);
   });
 
+  test("an egress operation is never read: reads have no approver to ask after taint", () => {
+    const ops = [{ operationId: "ping", method: "GET", path: "/nodes/{n}/ping" }, { operationId: "send", method: "POST", path: "/send" }];
+    const r = checkTiers({ operations: ops, tiers: { ping: { tier: "read", flags: { egress: true } }, send: { tier: "write", flags: { egress: true } } } });
+    assert.deepEqual(r.issues.map((i) => `${i.operationId}:${i.code}`), ["ping:egress_read"]);
+    assert.match(r.issues[0].message, /GET \/nodes\/\{n\}\/ping/);
+    assert.equal(checkTiers({ operations: ops, tiers: { ping: { tier: "read", flags: { egress: false } }, send: { tier: "write" } } }).ok, true);
+  });
+
   test("a non-GET read needs a real explanation; HEAD counts as GET", () => {
     const ops = [{ operationId: "q", method: "post", path: "/q" }, { operationId: "h", method: "HEAD", path: "/h" }];
     assert.equal(checkTiers({ operations: ops, tiers: { q: { tier: "read", read_reason: "short" }, h: { tier: "read" } } }).issues.length, 1);

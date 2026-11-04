@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { describe, test } from "node:test";
-import { computeEffective, loadPolicy, readNarrowing, staticProtection } from "../dist/guard/index.js";
+import { computeEffective, loadPolicy, parseFlag, readNarrowing, staticProtection } from "../dist/guard/index.js";
 import { ALL_ON, sandbox } from "./guard-helpers.mjs";
 
 function eff(t, { policy = ALL_ON, env = {}, mode = "sandbox", protectedPolicy = true, raw, ...rest } = {}) {
@@ -18,12 +18,19 @@ const codes = (e) => Object.fromEntries(Object.entries(e.groups).map(([g, s]) =>
 
 describe("readNarrowing", () => {
   test("switches and legacy flags", () => {
-    assert.deepEqual(readNarrowing({}, "toy"), { readonly: false, legacy: {} });
-    assert.deepEqual(readNarrowing({ NST_MCP_READONLY: "yes" }, "toy"), { readonly: true, readonlySource: "NST_MCP_READONLY", legacy: {} });
+    assert.deepEqual(readNarrowing({}, "toy"), { readonly: false, legacy: {}, envPrefix: "TOY" });
+    assert.deepEqual(readNarrowing({ NST_MCP_READONLY: "yes" }, "toy"), { readonly: true, readonlySource: "NST_MCP_READONLY", legacy: {}, envPrefix: "TOY" });
     assert.equal(readNarrowing({ TOY_PROFILE: "reader" }, "toy").readonlySource, "TOY_PROFILE=reader");
     assert.equal(readNarrowing({ TOY_PROFILE: "operator" }, "toy").readonly, false);
     assert.equal(readNarrowing({ NST_MCP_READONLY: "0" }, "toy").readonly, false);
     assert.deepEqual(readNarrowing({ TOY_ALLOW_WRITES: "true", TOY_ALLOW_SPEND: "maybe", TOY_ALLOW_DESTRUCTIVE: "" }, "toy").legacy, { writes: true, spend: false });
+  });
+
+  test("parseFlag is the guard's own flag reader, exported for servers", () => {
+    for (const v of ["1", "true", "YES", "on"]) assert.equal(parseFlag(v), true, v);
+    for (const v of ["0", "False", "no", "OFF", "maybe", " true"]) assert.equal(parseFlag(v), false, v);
+    assert.equal(parseFlag(undefined), undefined);
+    assert.equal(parseFlag(""), undefined);
   });
 });
 
@@ -39,7 +46,7 @@ describe("computeEffective", () => {
     assert.deepEqual(codes(eff(t, { policy: null })), { read: "on", change: "group_off", critical: "group_off", spend: "group_off" });
     const legacy = eff(t, { policy: null, env: { TOY_ALLOW_WRITES: "1" } });
     assert.deepEqual(on(legacy), ["read", "change"]);
-    assert.ok(legacy.warnings.some((w) => /Deprecated/.test(w)));
+    assert.ok(legacy.warnings.some((w) => /^Deprecated: TOY_ALLOW_WRITES=true/.test(w)), "the warning names the variable");
   });
 
   test("ALLOW_WRITES=true never raises over a policy file", (t) => {
@@ -62,11 +69,26 @@ describe("computeEffective", () => {
     assert.equal(eff(t, { env: { NST_MCP_READONLY: "1" }, protectedPolicy: false, mode: "live" }).groups.spend.reason_code, "readonly_profile");
   });
 
-  test("legacy false flags lower one group each; unknown values lower too", (t) => {
-    assert.equal(codes(eff(t, { env: { TOY_ALLOW_WRITES: "false" } })).change, "legacy_flag_off");
-    assert.equal(codes(eff(t, { env: { TOY_ALLOW_SPEND: "no" } })).spend, "legacy_flag_off");
-    assert.equal(codes(eff(t, { env: { TOY_ALLOW_DESTRUCTIVE: "off" } })).critical, "legacy_flag_off");
-    assert.equal(codes(eff(t, { env: { TOY_ALLOW_SPEND: "sure" } })).spend, "legacy_flag_off");
+  test("legacy false flags lower groups; unknown values lower too", (t) => {
+    // ALLOW_WRITES=false meant read-only in 0.1: it lowers every non-read group, so an
+    // upgrade that keeps it next to a policy with critical on does not leave critical on.
+    const writesOff = eff(t, { env: { TOY_ALLOW_WRITES: "false" } });
+    assert.deepEqual(codes(writesOff), { read: "on", change: "legacy_flag_off", critical: "legacy_flag_off", spend: "legacy_flag_off" });
+    for (const g of ["change", "critical", "spend"]) {
+      assert.match(writesOff.groups[g].reason, /^TOY_ALLOW_WRITES is set to a false or unrecognized value/, g);
+      assert.match(writesOff.groups[g].how_to_enable, /Remove TOY_ALLOW_WRITES/, g);
+    }
+    assert.deepEqual(codes(eff(t, { env: { TOY_ALLOW_WRITES: "garbage" } })), { read: "on", change: "legacy_flag_off", critical: "legacy_flag_off", spend: "legacy_flag_off" });
+    assert.deepEqual(codes(eff(t, { env: { TOY_ALLOW_SPEND: "no" } })), { read: "on", change: "on", critical: "on", spend: "legacy_flag_off" });
+    assert.deepEqual(codes(eff(t, { env: { TOY_ALLOW_DESTRUCTIVE: "off" } })), { read: "on", change: "on", critical: "legacy_flag_off", spend: "on" });
+    assert.match(eff(t, { env: { TOY_ALLOW_SPEND: "sure" } }).groups.spend.reason, /^TOY_ALLOW_SPEND /);
+    assert.match(eff(t, { env: { TOY_ALLOW_DESTRUCTIVE: "0" } }).groups.critical.reason, /^TOY_ALLOW_DESTRUCTIVE /);
+    // A narrowing built by hand without a prefix still reads sensibly.
+    const sb = sandbox(t);
+    sb.writePolicy(ALL_ON);
+    const loaded = loadPolicy({ server: "toy", env: sb.env });
+    const bare = computeEffective({ loaded, protection: staticProtection(true, sb.policyPath), mode: "sandbox", narrowing: { readonly: false, legacy: { writes: false } } });
+    assert.match(bare.groups.critical.reason, /^ALLOW_WRITES is set/);
   });
 
   test("an unprotected policy keeps critical and spend off outside sandbox", (t) => {

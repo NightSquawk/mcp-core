@@ -1,7 +1,8 @@
 /**
  * The tiers.json checker for build scripts (phase G2, conformance 7.6 item 1):
- * every operation has exactly one valid tier, flags are known, and an operation
- * that is not a GET only counts as `read` when the file says why.
+ * every operation has exactly one valid tier, flags are known, an operation that is
+ * not a GET only counts as `read` when the file says why, and an `egress` operation
+ * is never `read`.
  */
 import { TIERS, type OperationFlags, type Tier } from "./tiers.js";
 
@@ -24,7 +25,7 @@ export interface TiersCheckInput {
   allowExtra?: boolean;
 }
 
-export type TiersIssueCode = "missing" | "unknown_tier" | "unknown_flag" | "bad_flag" | "non_get_read" | "extra";
+export type TiersIssueCode = "missing" | "unknown_tier" | "unknown_flag" | "bad_flag" | "non_get_read" | "egress_read" | "extra";
 
 export interface TiersIssue {
   operationId: string;
@@ -67,6 +68,15 @@ export function checkTiers(input: TiersCheckInput): TiersCheckResult {
           } else if (typeof v !== "boolean") {
             issues.push({ operationId: op.operationId, code: "bad_flag", message: `${op.operationId}: flag ${f} must be true or false.` });
           }
+        }
+        // Reads run without an approver, so a tainted session could not be asked before
+        // an egress read sends data out (7.9). Such an operation needs a write tier or higher.
+        if (e.tier === "read" && (e.flags as Record<string, unknown>).egress === true) {
+          issues.push({
+            operationId: op.operationId,
+            code: "egress_read",
+            message: `${op.operationId}${where ? ` (${where})` : ""} sends data out (egress) but is tier read. Reads run without an approver; give it a write tier or higher.`,
+          });
         }
       }
     }

@@ -89,6 +89,23 @@ describe("rendering through the tools", () => {
     assert.equal(r.json.result.id, "thing_1");
   });
 
+  test("the untrusted note says whether marked fields or the whole result hold outside text", () => {
+    const json = (r) => JSON.parse(r.content[0].text);
+    const whole = json(renderRead({ status: "done", operation: "x", http_status: 200, data: { a: 1 }, untrusted_fields: 1, untrusted_whole: true }));
+    assert.equal(whole.untrusted_whole, true);
+    assert.match(whole.note, /whole result/);
+    const fields = json(renderRead({ status: "done", operation: "x", data: {}, untrusted_fields: 2 }));
+    assert.equal(fields.untrusted_whole, undefined);
+    assert.equal(fields.untrusted_fields, 2);
+    assert.match(fields.note, /^Fields marked untrusted/);
+    assert.equal(json(renderRead({ status: "done", operation: "x", data: {}, untrusted_fields: 0 })).note, undefined);
+    const done = json(renderExecute({ status: "done", operation: "x", idempotency_key: "k", data: {}, untrusted_fields: 1 }));
+    assert.match(done.note, /^Fields marked untrusted/);
+    const pending = json(renderExecute({ status: "pending", operation: "x", idempotency_key: "k", hold: { ref: "r" }, message: "m", data: {}, untrusted_fields: 1, untrusted_whole: true }));
+    assert.match(pending.note, /whole result/);
+    assert.equal(json(renderExecute({ status: "done", operation: "x", idempotency_key: "k", data: {} })).note, undefined);
+  });
+
   test("an oversized read is refused; an oversized done result is cut, never refused", async (t) => {
     const h = await harness(t, { respond: () => ({ ok: true, status: 200, data: { id: "obj_9", blob: "x".repeat(1000) }, providerIds: ["obj_9"] }) }, { maxResultChars: 300 });
     const read = await h.call("toy_read", { operation_id: "thing_list" });

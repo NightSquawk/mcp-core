@@ -12,35 +12,54 @@ export interface Narrowing {
   /** `<PREFIX>_PROFILE=reader` or `NST_MCP_READONLY=1`: read-only whatever the policy says. */
   readonly: boolean;
   readonlySource?: string;
-  /** Legacy flags (migration only): `false` lowers a group; only `writes=true` can raise, and only without a policy file. */
+  /**
+   * Legacy flags (migration only): `false` lowers; only `writes=true` can raise, and only
+   * without a policy file. `writes=false` lowers every non-read group: in 0.1 servers it
+   * meant read-only, deletes and stops included.
+   */
   legacy: { writes?: boolean; spend?: boolean; destructive?: boolean };
+  /** The env prefix the flags were read with (`PROXMOX`), so refusals can name the variable. */
+  envPrefix?: string;
 }
 
 const TRUE = /^(1|true|yes|on)$/i;
 const FALSE = /^(0|false|no|off)$/i;
 
-function flag(env: NodeJS.ProcessEnv, name: string): boolean | undefined {
-  const v = env[name];
-  if (v === undefined || v === "") return undefined;
-  if (TRUE.test(v)) return true;
-  if (FALSE.test(v)) return false;
-  return false; // anything unrecognized lowers, never raises
+/**
+ * An env switch the way the guard reads it: unset or empty is undefined, 1/true/yes/on
+ * is true, 0/false/no/off is false, and anything else is false (an unrecognized value
+ * lowers, never raises). Servers reading their own flags use this to match.
+ */
+export function parseFlag(value: string | undefined): boolean | undefined {
+  if (value === undefined || value === "") return undefined;
+  if (TRUE.test(value)) return true;
+  if (FALSE.test(value)) return false;
+  return false;
 }
 
 /** Read the narrowing switches. `envPrefix` is the server's env prefix, e.g. `COLUMN`. */
 export function readNarrowing(env: NodeJS.ProcessEnv, envPrefix: string): Narrowing {
   const P = envPrefix.toUpperCase();
   const profile = env[`${P}_PROFILE`];
-  const ro = flag(env, "NST_MCP_READONLY") === true;
+  const ro = parseFlag(env.NST_MCP_READONLY) === true;
+  const writes = parseFlag(env[`${P}_ALLOW_WRITES`]);
+  const spend = parseFlag(env[`${P}_ALLOW_SPEND`]);
+  const destructive = parseFlag(env[`${P}_ALLOW_DESTRUCTIVE`]);
   return {
     readonly: ro || profile === "reader",
     ...(ro ? { readonlySource: "NST_MCP_READONLY" } : profile === "reader" ? { readonlySource: `${P}_PROFILE=reader` } : {}),
     legacy: {
-      ...(flag(env, `${P}_ALLOW_WRITES`) !== undefined ? { writes: flag(env, `${P}_ALLOW_WRITES`) } : {}),
-      ...(flag(env, `${P}_ALLOW_SPEND`) !== undefined ? { spend: flag(env, `${P}_ALLOW_SPEND`) } : {}),
-      ...(flag(env, `${P}_ALLOW_DESTRUCTIVE`) !== undefined ? { destructive: flag(env, `${P}_ALLOW_DESTRUCTIVE`) } : {}),
+      ...(writes !== undefined ? { writes } : {}),
+      ...(spend !== undefined ? { spend } : {}),
+      ...(destructive !== undefined ? { destructive } : {}),
     },
+    envPrefix: P,
   };
+}
+
+/** `PROXMOX_ALLOW_WRITES`, or `ALLOW_WRITES` when the prefix is unknown. */
+function legacyName(narrowing: Narrowing, which: "WRITES" | "SPEND" | "DESTRUCTIVE"): string {
+  return `${narrowing.envPrefix ? `${narrowing.envPrefix}_` : ""}ALLOW_${which}`;
 }
 
 export interface GroupState {
@@ -91,7 +110,7 @@ export function computeEffective<P extends BasePolicy>(input: EffectiveInput<P>)
   const noFile = loaded.source === "default" && !loaded.error;
   if (noFile && narrowing.legacy.writes === true && !narrowing.readonly) {
     warnings.push(
-      "Deprecated: an ALLOW_WRITES env flag enabled the change group because no policy file exists. " +
+      `Deprecated: ${legacyName(narrowing, "WRITES")}=true enabled the change group because no policy file exists. ` +
         "This works for one more minor release; write a policy file (mcp-guard init) instead."
     );
   }
@@ -121,13 +140,21 @@ export function computeEffective<P extends BasePolicy>(input: EffectiveInput<P>)
     else if (narrowing.readonly && group !== "read") {
       state = off("readonly_profile", `${narrowing.readonlySource ?? "Read-only mode"} forces this process read-only.`, "Start the server without the read-only switch.");
     }
-    // 5. Legacy flags lower groups.
-    else if (group === "change" && narrowing.legacy.writes === false) {
-      state = off("legacy_flag_off", "An ALLOW_WRITES=false env flag turns the change group off.");
+    // 5. Legacy flags lower groups. ALLOW_WRITES=false lowers every non-read group: in
+    // 0.1 it meant read-only, so an upgrade that keeps it must not leave critical on.
+    else if (group !== "read" && narrowing.legacy.writes === false) {
+      const name = legacyName(narrowing, "WRITES");
+      state = off(
+        "legacy_flag_off",
+        `${name} is set to a false or unrecognized value, which turns the ${group} group off (in 0.1 servers it meant read-only).`,
+        `Remove ${name} from the server's environment; the policy file decides which groups run.`
+      );
     } else if (group === "spend" && narrowing.legacy.spend === false) {
-      state = off("legacy_flag_off", "An ALLOW_SPEND=false env flag turns the spend group off.");
+      const name = legacyName(narrowing, "SPEND");
+      state = off("legacy_flag_off", `${name} is set to a false or unrecognized value, which turns the spend group off.`, `Remove ${name} from the server's environment.`);
     } else if (group === "critical" && narrowing.legacy.destructive === false) {
-      state = off("legacy_flag_off", "An ALLOW_DESTRUCTIVE=false env flag turns the critical group off.");
+      const name = legacyName(narrowing, "DESTRUCTIVE");
+      state = off("legacy_flag_off", `${name} is set to a false or unrecognized value, which turns the critical group off.`, `Remove ${name} from the server's environment.`);
     }
     // 6. Unprotected policies never enable critical or spend, except in sandbox mode.
     else if (HIGH_RISK_GROUPS.includes(group) && !protection.protected && mode !== "sandbox") {

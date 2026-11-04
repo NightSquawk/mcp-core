@@ -92,6 +92,22 @@ export function labelUntrustedFields(
   return { value: walk(value, null), texts };
 }
 
+/** The texts of every UntrustedText label in an already-labelled value (a stored result returned again). */
+export function untrustedTexts(value: unknown, out: string[] = [], depth = 0): string[] {
+  if (depth > 64 || value === null || typeof value !== "object") return out;
+  if (Array.isArray(value)) {
+    for (const v of value) untrustedTexts(v, out, depth + 1);
+    return out;
+  }
+  const o = value as Record<string, unknown>;
+  if (o.untrusted === true && typeof o.text === "string") {
+    out.push(o.text);
+    return out;
+  }
+  for (const v of Object.values(o)) untrustedTexts(v, out, depth + 1);
+  return out;
+}
+
 /** Sanitize every string in a JSON value (used when a whole result is untrusted). */
 export function sanitizeDeep<T>(value: T): T {
   const walk = (v: unknown): unknown => {

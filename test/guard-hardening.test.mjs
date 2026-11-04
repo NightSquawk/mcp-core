@@ -440,3 +440,35 @@ test("redact and tokensOf stay linear on long adversarial strings", async () => 
   assert.deepEqual(tokensOf(`a${".".repeat(10)}b`), [`a${".".repeat(10)}b`]);
   assert.deepEqual(tokensOf("+.-x1y2-.+"), ["x1y2"]);
 });
+
+test("credential keys are masked by name, whatever their value looks like", async () => {
+  const { isSensitiveKey, redactSensitiveKeys } = await import("../dist/guard/index.js");
+  for (const k of ["password", "cipassword", "root_password", "Client-Secret", "api_key", "apiKey", "access_token", "privateKey", "secret_key", "key", "keys", "pin", "otp", "credentials", "tokens", "passphrase", "card-passcode"]) {
+    assert.equal(isSensitiveKey(k), true, k);
+  }
+  for (const k of ["idempotency_key", "ssh_keys", "tokenid", "description", "account_number", "keyboard", "", "secret_name", "pinned", "address", "bypass"]) {
+    assert.equal(isSensitiveKey(k), false, k);
+  }
+  assert.equal(isSensitiveKey("vault_phrase"), false);
+  assert.equal(isSensitiveKey("vault-phrase", ["vault_phrase"]), true, "extra names match after the same normalization");
+
+  const input = { user: "bob", password: "p4ss", nested: [{ token: 123 }, { mfa: { otp: "000111" } }], flags: { secret: true, key: null }, note: "has XSECRETX inside", creds: { credentials: { a: 1 } } };
+  const out = redactSensitiveKeys(input, { secrets: ["XSECRETX"] });
+  assert.deepEqual(out, {
+    user: "bob",
+    password: "[redacted]",
+    nested: [{ token: "[redacted]" }, { mfa: { otp: "[redacted]" } }],
+    flags: { secret: true, key: null },
+    note: "has [redacted] inside",
+    creds: { credentials: "[redacted]" },
+  });
+  assert.equal(input.password, "p4ss", "the input is not changed");
+  assert.deepEqual(redactSensitiveKeys({ at: new Date(0), token: "t0k3n" }), { at: "1970-01-01T00:00:00.000Z", token: "[redacted]" }, "toJSON values are walked as JSON");
+  let deep = { password: "x" };
+  for (let i = 0; i < 80; i++) deep = { d: deep };
+  assert.ok(JSON.stringify(redactSensitiveKeys(deep)).includes("[too deep]"));
+  const t0 = performance.now();
+  assert.equal(isSensitiveKey("x".repeat(400_000)), false);
+  assert.equal(isSensitiveKey(`${"x".repeat(400_000)}_password`), true);
+  assert.ok(performance.now() - t0 < 2_000, "linear in the key length");
+});
