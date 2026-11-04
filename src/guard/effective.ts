@@ -100,7 +100,7 @@ export function computeEffective<P extends BasePolicy>(input: EffectiveInput<P>)
     const cfg = approverFor(policy, group);
     approvers[group] = cfg.approver;
     const tiers = GROUP_TIERS[group].filter((t) => !policy.tiers_off.includes(t) && (t !== "sandbox" || mode === "sandbox"));
-    let state: Omit<GroupState, "tiers"> | null = null;
+    let state: ServerCheckResult | null = null;
 
     // 1. The policy value (or the built-in default).
     const configured = policy.groups[group] ?? DEFAULT_GROUPS[group];
