@@ -104,7 +104,8 @@ export class IdempotencyStore {
       for (const [k, e] of Object.entries(f.entries)) if (now.getTime() - Date.parse(e.created_at) > KEEP_MS) delete f.entries[k];
       const existing = f.entries[key] ? this.#normalize(f.entries[key]) : null;
       const expired = existing && opts.windowMs !== undefined && now.getTime() - Date.parse(existing.created_at) > opts.windowMs && existing.status !== "in_flight";
-      if (existing && existing.status !== "failed" && !(existing.status === "unknown" && existing.pid === -1) && !expired) {
+      // `unknown` is never claimed here: only reclaimUnknown() may retry it, for a provider that dedupes on the key.
+      if (existing && existing.status !== "failed" && !expired) {
         return { claimed: false, existing };
       }
       f.entries[key] = { key, ...info, status: "in_flight", created_at: now.toISOString(), pid: process.pid };
