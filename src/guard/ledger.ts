@@ -1,0 +1,133 @@
+/**
+ * Rolling per-day totals and rate counters (section 7.2). Advisory: rebuilt from
+ * the audit log if missing, and cross-checked with the server's providerTotals()
+ * for spend caps. Shared by every session on the machine (file + lock).
+ */
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import type { AuditLog } from "./audit.js";
+import { nonce, utcDay } from "./canonical.js";
+import { readJsonFile, withFileLock, writeJsonFile } from "./lock.js";
+import type { Group } from "./tiers.js";
+
+export type LedgerStatus = "reserved" | "done" | "pending" | "unknown" | "failed";
+
+export interface LedgerEvent {
+  id: string;
+  t: number;
+  group: Group;
+  op: string;
+  cents?: number;
+  currency?: string;
+  status: LedgerStatus;
+}
+
+interface LedgerFile {
+  version: 1;
+  rebuilt_from_audit?: string;
+  events: LedgerEvent[];
+}
+
+const KEEP_MS = 49 * 3_600_000;
+const WINDOW_MS = { minute: 60_000, hour: 3_600_000 } as const;
+
+export interface LedgerSnapshot {
+  /** Spend counted today (UTC) in `currency`, from this ledger. */
+  spendToday(currency: string): number;
+  /** Calls in a group within a window: `minute`/`hour` are rolling, `day` is the UTC day. */
+  count(group: Group, window: "minute" | "hour" | "day"): number;
+}
+
+export class Ledger {
+  readonly file: string;
+  readonly #lock: string;
+  readonly #clock: () => Date;
+  readonly #audit?: AuditLog;
+
+  constructor(dir: string, opts: { clock?: () => Date; audit?: AuditLog } = {}) {
+    this.file = join(dir, "ledger.json");
+    this.#lock = join(dir, "ledger.lock");
+    this.#clock = opts.clock ?? (() => new Date());
+    this.#audit = opts.audit;
+  }
+
+  #load(): LedgerFile {
+    if (!existsSync(this.file) && this.#audit) return this.#rebuild();
+    try {
+      const f = readJsonFile<LedgerFile>(this.file, { version: 1, events: [] });
+      return Array.isArray(f.events) ? f : { version: 1, events: [] };
+    } catch {
+      return this.#audit ? this.#rebuild() : { version: 1, events: [] };
+    }
+  }
+
+  /** Rebuild from the audit log: every executed, pending or unknown-outcome call. */
+  #rebuild(): LedgerFile {
+    const events: LedgerEvent[] = [];
+    for (const l of this.#audit?.read() ?? []) {
+      if (!l.group || l.dry_run) continue;
+      const status: LedgerStatus | null =
+        l.decision === "executed" ? "done" : l.decision === "pending" ? "pending" : l.decision === "unknown_outcome" ? "unknown" : null;
+      if (!status) continue;
+      events.push({
+        id: `audit-${l.hash.slice(7, 19)}`,
+        t: Date.parse(l.ts),
+        group: l.group,
+        op: l.operation,
+        ...(l.amount_cents !== undefined ? { cents: l.amount_cents } : {}),
+        ...(l.currency ? { currency: l.currency } : {}),
+        status,
+      });
+    }
+    return { version: 1, rebuilt_from_audit: this.#clock().toISOString(), events };
+  }
+
+  #snapshot(f: LedgerFile): LedgerSnapshot {
+    const now = this.#clock();
+    const today = utcDay(now);
+    const live = f.events.filter((e) => e.status !== "failed");
+    return {
+      spendToday: (currency) =>
+        live
+          .filter((e) => e.group === "spend" && e.currency === currency && utcDay(new Date(e.t)) === today)
+          .reduce((sum, e) => sum + (e.cents ?? 0), 0),
+      count: (group, window) =>
+        live.filter((e) => e.group === group && (window === "day" ? utcDay(new Date(e.t)) === today : now.getTime() - e.t < WINDOW_MS[window]))
+          .length,
+    };
+  }
+
+  /** A read-only view (dry runs and step 4 checks). */
+  snapshot(): LedgerSnapshot {
+    return this.#snapshot(this.#load());
+  }
+
+  /**
+   * Check and reserve atomically (step 8 re-check): `check` sees the totals under
+   * the lock; when it returns null the event is recorded as `reserved`.
+   */
+  reserve<R>(event: Omit<LedgerEvent, "id" | "t" | "status">, check: (s: LedgerSnapshot) => R | null): { refusal: R } | { id: string } {
+    return withFileLock(this.#lock, () => {
+      const f = this.#load();
+      const refusal = check(this.#snapshot(f));
+      if (refusal !== null) return { refusal };
+      const id = nonce();
+      const now = this.#clock().getTime();
+      f.events = f.events.filter((e) => now - e.t < KEEP_MS);
+      f.events.push({ ...event, id, t: now, status: "reserved" });
+      writeJsonFile(this.file, f);
+      return { id };
+    });
+  }
+
+  settle(id: string, status: Exclude<LedgerStatus, "reserved">): void {
+    withFileLock(this.#lock, () => {
+      const f = this.#load();
+      const e = f.events.find((x) => x.id === id);
+      if (e) {
+        e.status = status;
+        writeJsonFile(this.file, f);
+      }
+    });
+  }
+}
