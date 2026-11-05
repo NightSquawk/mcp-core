@@ -180,7 +180,11 @@ const PS_HELPERS: readonly PsHelper[] = [
   },
 ];
 
-const calls = (text: string, name: string) => new RegExp(`(^|[\\s;{(|])${name.replace(/[-$]/g, "\\$&")}(?=[\\s;)}]|$)`, "m").test(text);
+/** `text` as a RegExp that matches it literally: every character a RegExp reads as syntax, backslash included, is escaped. */
+const literal = (text: string) => text.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+
+/** Whether a statement in `text` calls the helper `name`: the name as a whole command word. */
+const calls = (text: string, name: string) => new RegExp(`(^|[\\s;{(|])${literal(name)}(?=[\\s;)}]|$)`, "m").test(text);
 
 /**
  * Windows: admin statements as one PowerShell block. PowerShell runs a pasted block as one unit,
