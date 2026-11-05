@@ -272,7 +272,7 @@ test("init: the printed PowerShell takes over a ProgramData-like folder chain on
   icacls(parent, "/grant", "*S-1-1-0:(OI)(CI)F");
 
   const text = starterPolicyText("toy");
-  const ps = powershell(asScript(windowsPolicyCommands(root, "toy", text)));
+  const ps = powershell(asScript([powershellBlock(windowsPolicyCommands(root, "toy", text))]));
   assert.equal(ps.status, 0, ps.stderr || ps.stdout);
   assert.equal(readFileSync(file, "utf8").replaceAll("\r\n", "\n"), text.replace(/\n$/, ""), "the here-string holds the policy as printed");
   assert.deepEqual(acl(root), { owner: ADMINS, protected: true, rules: adminOnly(false) });
