@@ -23,7 +23,7 @@ import { AuditLog, type AuditEntry, type AuditLine } from "./audit.js";
 import { Canaries, CANARY_SALT_ENV } from "./canaries.js";
 import { canonicalJson, deepFreeze, jsonClone, sha256Hex, utcDay } from "./canonical.js";
 import { computeEffective, readNarrowing, type Effective, type GroupState, type ServerCheckResult } from "./effective.js";
-import { IdempotencyStateError, IdempotencyStore, MIN_KEY_LENGTH, deriveKey, type IdemEntry } from "./idempotency.js";
+import { IdempotencyStateError, IdempotencyStore, MIN_KEY_LENGTH, deriveKey, retainedDays, type IdemEntry } from "./idempotency.js";
 import { LockTimeoutError } from "./lock.js";
 import { KillSwitch, type KillState } from "./kill-switch.js";
 import { Ledger, type LedgerSnapshot, type LedgerStatus } from "./ledger.js";
@@ -747,14 +747,19 @@ export class Guard<P extends BasePolicy = BasePolicy> {
     base.request_hash = requestHash;
     const now = this.#clock();
     const today = utcDay(now);
-    const yesterday = utcDay(new Date(now.getTime() - 86_400_000));
     const maxLength = this.#opts.idempotencyMaxLength ?? 255;
     const windowMs = this.#opts.idempotencyWindowMs ?? 10 * 60_000;
     const keyFor = (day: string) => deriveKey({ server: this.server, operation: op.operationId, canonicalBody, proposalDay: day, maxLength });
     const keyToday = keyFor(today);
+    // Today's key, then the key of every earlier day the store still holds (newest first): a call
+    // whose outcome is unknown, or that the provider holds, blocks an identical retry (or lends it
+    // its key) until it is resolved or pruned, not only until the next UTC day. A done call from an
+    // earlier day matches only inside the window, which covers a retry just after midnight.
     let existing: IdemEntry | null;
     try {
-      existing = this.idempotency.lookup([keyToday], op.idempotencyKey ? {} : { windowMs }) ?? this.idempotency.lookup([keyFor(yesterday)], { windowMs });
+      existing =
+        this.idempotency.lookup([keyToday], op.idempotencyKey ? {} : { windowMs }) ??
+        this.idempotency.lookup(retainedDays(now).filter((d) => d !== today).map(keyFor), { windowMs });
     } catch (e) {
       return this.#refused(base, this.#stateRefusal(e));
     }

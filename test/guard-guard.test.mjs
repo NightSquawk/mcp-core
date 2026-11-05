@@ -417,6 +417,37 @@ describe("step 5: idempotency and dry_run", () => {
     assert.equal((await exec(guard, "payment_create", pay(), { handler: h })).status, "deduplicated");
   });
 
+  test("an unknown outcome blocks an identical retry for as long as the store keeps it, not only until the next day", async (t) => {
+    const clock = manualClock("2026-11-04T10:00:00.000Z");
+    const { guard } = mk(t, { guard: { clock } });
+    const boom = stub(() => ({ ok: false, status: 502, error: { message: "bad gateway" }, sent: true }));
+    assert.equal((await exec(guard, "thing_create", { body: { a: 1 } }, { handler: boom })).status, "unknown_outcome");
+    const p1 = await exec(guard, "payment_create", pay(), { handler: boom });
+    assert.equal(p1.status, "unknown_outcome");
+    clock.advance(2 * 86_400_000 + 3_600_000); // 2026-11-06T11:00Z: two UTC days on
+    const ok = stub();
+    assert.equal(code(await exec(guard, "thing_create", { body: { a: 1 } }, { handler: ok })), "outcome_unknown");
+    const p2 = await exec(guard, "payment_create", pay(), { handler: ok });
+    assert.equal(p2.status, "done");
+    assert.equal(ok.calls.length, 1, "only the retry the provider can dedupe is sent");
+    assert.equal(ok.calls[0].ctx.idempotencyKey, p1.idempotency_key, "with the original key, not one derived from today");
+    clock.advance(86_400_000); // 2026-11-07T11:00Z: past the three days, so the entry is pruned
+    assert.equal((await exec(guard, "thing_create", { body: { a: 1 } }, { handler: ok })).status, "done");
+  });
+
+  test("a call the approver still holds two days later is returned, not asked for again", async (t) => {
+    const clock = manualClock("2026-11-04T10:00:00.000Z");
+    let asked = 0;
+    const later = { name: "none", human: true, request: async () => (asked++, { result: "pending", approver: "none", ref: "prop_1" }) };
+    const { guard } = mk(t, { guard: { clock, approvers: { none: later } } });
+    assert.equal((await exec(guard, "payment_create", pay())).status, "pending");
+    clock.advance(2 * 86_400_000 + 3_600_000);
+    const again = await exec(guard, "payment_create", pay());
+    assert.equal(again.status, "deduplicated");
+    assert.equal(again.original.pending.ref, "prop_1");
+    assert.equal(asked, 1);
+  });
+
   test("yesterday's key still matches just after midnight", async (t) => {
     const clock = manualClock("2026-11-04T23:59:30.000Z");
     const { guard } = mk(t, { guard: { clock } });

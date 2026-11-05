@@ -78,7 +78,19 @@ interface IdemFile {
   entries: Record<string, IdemEntry>;
 }
 
-const KEEP_MS = 3 * 86_400_000;
+const DAY_MS = 86_400_000;
+const KEEP_MS = 3 * DAY_MS;
+
+/**
+ * The UTC days whose entries the store may still hold, newest first. An entry is kept for three
+ * days after it was created, so a call made on any of these days can still be unknown or held by
+ * the provider, and a retry has to look up the key derived from each of them.
+ */
+export function retainedDays(now: Date): string[] {
+  const days: string[] = [];
+  for (let back = 0; back * DAY_MS <= KEEP_MS; back++) days.push(utcDay(new Date(now.getTime() - back * DAY_MS)));
+  return days;
+}
 /** An in-flight entry older than this belongs to a process that died mid-call. */
 const STALE_IN_FLIGHT_MS = 5 * 60_000;
 
@@ -130,15 +142,20 @@ export class IdempotencyStore {
     return e;
   }
 
-  /** The first of `keys` with an entry (no write; used by dry_run and step 5). A `done` entry past the window is skipped. */
+  /**
+   * The first of `keys` whose entry still stands (no write; used by dry_run and step 5). Entries
+   * that let the request run again (failed, or done past the window) are skipped, and so are
+   * entries older than three days, which begin() prunes: the search goes on to the older keys,
+   * so a newer failed attempt never hides an older call whose outcome is unknown.
+   */
   lookup(keys: readonly string[], opts: { windowMs?: number } = {}): IdemEntry | null {
     const f = this.#load();
     const now = this.#clock().getTime();
     for (const k of keys) {
       const e = Object.prototype.hasOwnProperty.call(f.entries, k) ? f.entries[k] : undefined;
-      if (!e) continue;
+      if (!e || now - Date.parse(e.created_at) > KEEP_MS) continue;
       const n = this.#normalize(e);
-      if (n.status === "done" && this.#reopens(n, opts.windowMs, now)) continue;
+      if (this.#reopens(n, opts.windowMs, now)) continue;
       return n;
     }
     return null;

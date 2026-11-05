@@ -125,6 +125,30 @@ test("idempotency: entries older than three days are pruned on begin", (t) => {
   );
 });
 
+test("idempotency: retainedDays lists every UTC day the store can still hold, newest first", () => {
+  assert.deepEqual(I.retainedDays(new Date("2026-11-04T10:00:00.000Z")), ["2026-11-04", "2026-11-03", "2026-11-02", "2026-11-01"]);
+  assert.deepEqual(I.retainedDays(new Date("2026-11-04T00:00:00.000Z")), ["2026-11-04", "2026-11-03", "2026-11-02", "2026-11-01"]);
+});
+
+test("idempotency: lookup skips entries that let the request run again, and entries past the three days", (t) => {
+  const clock = manualClock("2026-11-04T10:00:00.000Z");
+  const s = new I.IdempotencyStore(tempDir(t), { clock });
+  s.begin("older", info);
+  s.finish("older", "unknown");
+  s.begin("newer", info);
+  s.finish("newer", "failed");
+  s.begin("done", info);
+  s.finish("done", "done");
+  const found = s.lookup(["newer", "older"]);
+  assert.equal(found.key, "older", "a newer failed attempt does not hide an older unknown outcome");
+  assert.equal(found.status, "unknown");
+  assert.equal(s.lookup(["newer"]), null);
+  clock.advance(11 * MIN);
+  assert.equal(s.lookup(["done", "older"], { windowMs: 10 * MIN }).key, "older", "a done entry past the window is skipped too");
+  clock.advance(3 * 86_400_000);
+  assert.equal(s.lookup(["older"]), null, "past the three days the store keeps it, as begin() would prune it");
+});
+
 test("idempotency: cancel needs a unique match and only reopens a call that may not have happened", (t) => {
   const s = new I.IdempotencyStore(tempDir(t), { clock: manualClock() });
   const keyOf = (b) => I.deriveKey(input({ canonicalBody: b }));
