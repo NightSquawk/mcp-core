@@ -70,7 +70,10 @@ export interface ExecuteHooks {
   extract?: (op: OperationRef, request: GuardRequest) => Promise<Extraction | Refusal> | Extraction | Refusal;
   /** The object's current state before a write/destructive/sensitive change (step 7). Undefined = nothing to save. */
   fetchCurrent?: (op: OperationRef, request: GuardRequest) => Promise<unknown>;
-  /** For the `external` approver: did the provider hold the action for a human? */
+  /**
+   * For the `external` approver: did the provider hold the action for a human? It runs after the
+   * call was sent, so a throw makes the outcome unknown, and on a live key it also sets the kill switch.
+   */
   external?: (op: OperationRef, result: { status?: number; data: unknown }) => ExternalHold;
 }
 
@@ -938,19 +941,7 @@ export class Guard<P extends BasePolicy = BasePolicy> {
           message: res.sent ? "The provider rejected the request; nothing was done." : "The request was not sent.",
         };
       }
-      const stateNote = this.#finish(key, "unknown", { http_status: res.status ?? null });
-      this.ledger.settle(reservation.id, "unknown");
-      this.#write({ ...base, decision: "unknown_outcome", http_status: res.status ?? null, duration_ms, ...(stateNote ? { note: stateNote } : {}) });
-      return {
-        status: "unknown_outcome",
-        operation: op.operationId,
-        idempotency_key: key,
-        ...(res.status !== undefined ? { http_status: res.status } : {}),
-        error,
-        message:
-          `The provider may or may not have done this. Check with ${this.toolName("read")} before anything else. ` +
-          (op.idempotencyKey ? "Retrying the same request reuses the same idempotency key, so the provider will not run it twice." : "An identical retry is refused until a human clears it."),
-      };
+      return this.#unknownOutcome({ key, reservationId: reservation.id, base, op, status: res.status, duration_ms, error, said: "The provider may or may not have done this." });
     }
 
     // Untrusted content (7.9) is labelled and taints the session on this path too.
@@ -961,7 +952,23 @@ export class Guard<P extends BasePolicy = BasePolicy> {
       ...(processed.whole ? { untrusted_whole: true } : {}),
     };
     const providerIds = res.providerIds?.map((id) => this.redact(id));
-    const hold: ExternalHold = input.hooks?.external ? input.hooks.external(op, { status: res.status, data: res.data }) : { held: false };
+    let hold: ExternalHold = { held: false };
+    if (input.hooks?.external) {
+      try {
+        hold = input.hooks.external(op, { status: res.status, data: res.data });
+      } catch (e) {
+        // Sent and accepted, but whether the provider holds it cannot be read: done or held is unknown.
+        const error = { message: `The hold check could not read the provider's answer: ${this.redact(String((e as Error)?.message ?? e))}` };
+        let note: string | undefined;
+        if (approver.name === "external" && this.mode !== "sandbox") {
+          const reason = `${op.operationId} ran under the external approver, but whether the provider held it for a human could not be read.`;
+          this.kill.trip(group, reason);
+          this.#write({ ...base, decision: "alert", alert: "external_hold_unreadable", note: reason, provider_ids: providerIds });
+          note = `${reason} The ${group} kill switch is now set.`;
+        }
+        return this.#unknownOutcome({ key, reservationId: reservation.id, base, op, status: res.status, duration_ms, error, providerIds, note, said: "The provider accepted this, but whether it did it or holds it for a human could not be read." });
+      }
+    }
     const warnings: string[] = [];
     if (approver.name === "external" && !hold.held) {
       const reason = `${op.operationId} ran under the external approver but the provider did not hold it for a human.`;
@@ -1006,6 +1013,36 @@ export class Guard<P extends BasePolicy = BasePolicy> {
       data,
       ...untrustedInfo,
       ...(warnings.length ? { warnings } : {}),
+    };
+  }
+
+  /** A sent call whose outcome cannot be told: finish the key and the reservation as unknown, audit it, and say what to do next. */
+  #unknownOutcome(o: {
+    key: string;
+    reservationId: string;
+    base: AuditEntry;
+    op: OperationRef;
+    status: number | undefined;
+    duration_ms: number;
+    error: unknown;
+    /** What is known, as the first sentence of the message. */
+    said: string;
+    providerIds?: string[];
+    note?: string;
+  }): ExecuteOutcome {
+    const stateNote = this.#finish(o.key, "unknown", { http_status: o.status ?? null });
+    this.ledger.settle(o.reservationId, "unknown");
+    const note = [o.note, stateNote].filter(Boolean).join(" ");
+    this.#write({ ...o.base, decision: "unknown_outcome", http_status: o.status ?? null, ...(o.providerIds?.length ? { provider_ids: o.providerIds } : {}), duration_ms: o.duration_ms, ...(note ? { note } : {}) });
+    return {
+      status: "unknown_outcome",
+      operation: o.op.operationId,
+      idempotency_key: o.key,
+      ...(o.status !== undefined ? { http_status: o.status } : {}),
+      error: o.error,
+      message:
+        `${o.said} Check with ${this.toolName("read")} before anything else. ` +
+        (o.op.idempotencyKey ? "Retrying the same request reuses the same idempotency key, so the provider will not run it twice." : "An identical retry is refused until a human clears it."),
     };
   }
 

@@ -507,6 +507,31 @@ describe("external approver (provider-held actions)", () => {
     assert.ok(lines(guard).some((l) => l.alert === "external_not_held"));
     assert.equal(code(await exec(guard, "payment_create", pay(600), { hooks: ext(false) })), "kill_switch");
   });
+
+  test("a hold hook that throws after the call was sent: an unknown outcome, settled and audited; on a live key the group stops", async (t) => {
+    const broken = {
+      external: () => {
+        throw new Error(`unexpected shape ${SECRET}`);
+      },
+    };
+    for (const mode of ["sandbox", "live"]) {
+      const { guard } = mk(t, { policy, mode });
+      const h = stub();
+      const r = await exec(guard, "payment_create", pay(), { handler: h, hooks: broken });
+      assert.equal(r.status, "unknown_outcome", mode);
+      assert.match(r.error.message, /^The hold check could not read the provider's answer: unexpected shape/);
+      assert.match(r.message, /^The provider accepted this, but whether it did it or holds it for a human could not be read\. Check with toy_read/);
+      assert.ok(!JSON.stringify(r).includes(SECRET), "redacted");
+      assert.equal(h.calls.length, 1, "sent once");
+      assert.equal(guard.idempotency.entries()[0].status, "unknown", "not left in flight");
+      assert.equal(JSON.parse(readFileSync(guard.ledger.file, "utf8")).events.at(-1).status, "unknown", "the reservation is settled");
+      assert.ok(lines(guard).some((l) => l.decision === "unknown_outcome" && l.provider_ids?.length === 1), "audited with the provider's id");
+      if (mode === "live") {
+        assert.ok(guard.kill.stopped("spend"), "a hold that cannot be confirmed stops the group, as one that is missing does");
+        assert.ok(lines(guard).some((l) => l.alert === "external_hold_unreadable"));
+      } else assert.equal(guard.kill.stopped("spend"), null);
+    }
+  });
 });
 
 describe("steps 7-8: pre-image and execute-time re-checks", () => {
