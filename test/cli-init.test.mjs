@@ -97,7 +97,7 @@ test("standard paths on Windows: each folder is taken over, top first, before th
   const dir = `${root}\\${SERVER}`;
   const file = `${dir}\\policy.json`;
   const policy = starterPolicyText(SERVER);
-  // NightSquawk keeps ProgramData's permissions (Users may add to it); only the policy root stops inheriting.
+  // NightSquawk gets ProgramData's own entries (Users may add to it); the policy root and below are admin-only.
   assert.deepEqual(windowsPolicyCommands(root, SERVER, policy), [
     `Set-AdminFolder '${parent}' -UsersMayCreate`,
     `Set-AdminFolder '${root}' -Protect`,
@@ -116,7 +116,7 @@ test("standard paths on Windows: each folder is taken over, top first, before th
   const lines = block.split("\n");
   assert.ok(lines.indexOf(`Set-AdminFolder '${dir}'`) < lines.indexOf(`Write-NewFile '${file}' $policy`), "the folders are taken over before the write");
   const runs = lines.filter((l) => /\bicacls (\$Path|')/.test(l));
-  assert.equal(runs.length, 7, runs.join("\n"));
+  assert.equal(runs.length, 9, runs.join("\n"));
   assert.ok(runs.every((l) => !/ \/[TC]\b/.test(l)), "never recursive (/T can follow a junction planted inside), and no /C: a failure stops the block");
   assert.match(block, /icacls \$Path \/setowner '\*S-1-5-32-544' \/L\n {2}icacls \$Path \/reset \/L\n/, "the owner is set before each /reset");
   assert.match(block, /\n'@\nWrite-NewFile /, "here-string terminator at the start of its line");

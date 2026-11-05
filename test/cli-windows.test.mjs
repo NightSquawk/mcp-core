@@ -16,7 +16,7 @@ const { commandLine } = await import(dist("cli/harness.js"));
 const { realProbes, TRUSTED_OWNER_SIDS } = await import(dist("guard/protection.js"));
 const { programDataDir } = await import(dist("guard/paths.js"));
 const { starterPolicyText, windowsPolicyCommands } = await import(dist("cli/init.js"));
-const { powershellBlock } = await import(dist("cli/shell.js"));
+const { powershellBlock, psQuote } = await import(dist("cli/shell.js"));
 
 const windows = process.platform === "win32";
 const skip = !windows && "a Windows-host test; the other cli-*.test.mjs files cover POSIX hosts";
@@ -111,6 +111,37 @@ function acl(path) {
   assert.equal(r.status, 0, r.stderr);
   return JSON.parse(r.stdout);
 }
+
+/**
+ * Every access entry of a folder, by SID, with its rights (as a number, without Synchronize, which
+ * icacls adds to some), inheritance and propagation flags (InheritanceFlags/PropagationFlags as numbers).
+ */
+function entries(path) {
+  const r = powershell(
+    [
+      `$acl = Get-Acl -LiteralPath '${path.replaceAll("'", "''")}'`,
+      "$rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | ForEach-Object {",
+      "  '{0} {1} 0x{2:X} {3}/{4} inherited={5}' -f $_.IdentityReference.Value, $_.AccessControlType, ([int64]$_.FileSystemRights -band -bnot 0x100000), [int]$_.InheritanceFlags, [int]$_.PropagationFlags, $_.IsInherited",
+      "})",
+      "ConvertTo-Json -InputObject $rules -Compress",
+    ].join("\n"),
+  );
+  assert.equal(r.status, 0, r.stderr);
+  return JSON.parse(r.stdout).sort();
+}
+
+/**
+ * The entries Windows gives ProgramData, as init sets them on NightSquawk: SYSTEM and Administrators
+ * full control; CREATOR OWNER full control of what each account adds (inherit-only, 3/2); Users read;
+ * and Users may add files and folders (WD, AD, WEA, WA = 0x116), in folders only (1/0).
+ */
+const PROGRAM_DATA_ENTRIES = [
+  "S-1-3-0 Allow 0xF01FF 3/2 inherited=False",
+  "S-1-5-18 Allow 0xF01FF 3/0 inherited=False",
+  `${ADMINS} Allow 0xF01FF 3/0 inherited=False`,
+  "S-1-5-32-545 Allow 0x200A9 3/0 inherited=False",
+  "S-1-5-32-545 Allow 0x116 1/0 inherited=False",
+].sort();
 
 test("harness --claude --hook: the printed PowerShell installs the drop-in as printed, and the hook denies through the real binary", { skip: skipUnelevated }, async (t) => {
   const w = world(t);
@@ -233,18 +264,31 @@ test("harness --cursor: a junction in place of the Cursor folder is refused, and
   assert.deepEqual(acl(elsewhere), before, "nothing changed where the junction leads");
 });
 
-test("init: a ProgramData that lets Users change what it holds stops the commands before the policy is written", { skip: skipUnelevated }, (t) => {
+test("init: a ProgramData that lets Users change what it holds hands none of that to NightSquawk or the policy", { skip: skipUnelevated }, (t) => {
   const base = realpathSync.native(tempDir(t, "mcp-guard-init-"));
   const pd = join(base, "ProgramData");
   mkdirSync(pd);
-  // Users may modify (and so rename or delete) every folder that inherits this, NightSquawk included.
+  // Users may modify (and so rename or delete) every folder that inherits this.
   icacls(pd, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", `*${ADMINS}:(OI)(CI)F`, "*S-1-5-32-545:(OI)(CI)M");
-  const root = join(pd, "NightSquawk", "mcp");
+  const parent = join(pd, "NightSquawk");
+  const root = join(parent, "mcp");
   const ps = powershell(asScript([powershellBlock(windowsPolicyCommands(root, "toy", starterPolicyText("toy")))]));
-  assert.notEqual(ps.status, 0, "the check after the takeover stops the commands");
+  assert.equal(ps.status, 0, ps.stderr || ps.stdout);
+  assert.deepEqual(entries(parent), PROGRAM_DATA_ENTRIES, "NightSquawk no longer inherits Modify for Users");
+  assert.deepEqual(acl(root), { owner: ADMINS, protected: true, rules: adminOnly(false) });
+});
+
+test("Set-AdminFolder stops the block when another account can still change the folder", { skip: skipUnelevated }, (t) => {
+  const base = realpathSync.native(tempDir(t, "mcp-guard-check-"));
+  // Users may modify (and so rename or delete) every folder that inherits this.
+  icacls(base, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", `*${ADMINS}:(OI)(CI)F`, "*S-1-5-32-545:(OI)(CI)M");
+  const dir = join(base, "inherits");
+  const next = join(base, "next");
+  const ps = powershell(asScript([powershellBlock([`Set-AdminFolder ${psQuote(dir)}`, `Set-AdminFolder ${psQuote(next)}`])]));
+  assert.notEqual(ps.status, 0, "the check after the takeover stops the block");
   // Without white space: PowerShell wraps a long error message at the console width.
-  assert.match(`${ps.stderr}${ps.stdout}`.replace(/\s+/g, ""), /S-1-5-32-545canstillchange.*NightSquawk\(Modify,Synchronize\)/);
-  assert.equal(existsSync(root), false, "nothing after the check ran");
+  assert.match(`${ps.stderr}${ps.stdout}`.replace(/\s+/g, ""), /S-1-5-32-545canstillchange.*inherits\(Modify,Synchronize\)/);
+  assert.equal(existsSync(next), false, "nothing after the check ran");
 });
 
 test("harness --codex on Windows says to check who owns the ProgramData folders", { skip }, async (t) => {
@@ -267,7 +311,8 @@ test("init: the printed PowerShell takes over a ProgramData-like folder chain on
   const root = join(parent, "mcp");
   const dir = join(root, "toy");
   const file = join(dir, "policy.json");
-  // A user made NightSquawk first and opened it to everyone.
+  // An account made NightSquawk first (ProgramData's CREATOR OWNER entry gives it full control of the
+  // folder) and opened it to everyone.
   mkdirSync(parent);
   icacls(parent, "/grant", "*S-1-1-0:(OI)(CI)F");
 
@@ -278,10 +323,12 @@ test("init: the printed PowerShell takes over a ProgramData-like folder chain on
   assert.deepEqual(acl(root), { owner: ADMINS, protected: true, rules: adminOnly(false) });
   assert.deepEqual(acl(dir), { owner: ADMINS, protected: false, rules: adminOnly(true) });
   assert.deepEqual(acl(file), { owner: ADMINS, protected: false, rules: adminOnly(true) });
+  // NightSquawk has ProgramData's own entries, set on it: the entry for everyone is gone, and so is
+  // the full control the account that made it got through CREATOR OWNER.
   const top = acl(parent);
   assert.equal(top.owner, ADMINS);
-  assert.equal(top.protected, false, "NightSquawk keeps what ProgramData hands down");
-  assert.ok(top.rules.length > 0 && top.rules.every((r) => r.endsWith("inherited=True")), `the entry for everyone is gone: ${JSON.stringify(top.rules)}`);
+  assert.equal(top.protected, true, "NightSquawk no longer inherits");
+  assert.deepEqual(entries(parent), PROGRAM_DATA_ENTRIES);
   // The owner probe the policy check runs agrees.
   const owners = realProbes().windowsOwners([file, dir, root, parent]);
   assert.ok(owners, "the probe answered");

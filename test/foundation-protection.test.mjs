@@ -337,7 +337,7 @@ test("windowsPart1: a writable file or a folder the user can create in is a reas
     assert.equal(c.ok, false, dir);
     assert.ok(c.reasons.includes(`This user can create files in ${dir}.`), JSON.stringify(c.reasons));
   }
-  // init leaves NightSquawk with ProgramData's permissions, where users may create folders. Only its owner counts.
+  // init gives NightSquawk ProgramData's own entries, so users may create folders in it. Only its owner counts.
   const above = P.windowsPart1(WIN_POLICY, fakeProbes({ platform: "win32", env: winEnv, files, creatable: ["C:\\ProgramData\\NightSquawk", "C:\\ProgramData"] }));
   assert.deepEqual(above, { ok: true, reasons: [] });
   assert.equal(P.windowsPart1(WIN_POLICY, fakeProbes({ platform: "win32", env: winEnv })).ok, false, "missing file");

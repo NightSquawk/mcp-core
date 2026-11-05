@@ -23,9 +23,10 @@ export interface InitArgs {
 /**
  * Windows: take over a chain of folders, top first, one at a time (Set-AdminFolder, in shell.ts):
  * each is made if it is missing, Administrators own it, the entries anyone else added are dropped,
- * and the result is checked before the next one. A folder `protect` picks stops inheriting. The
- * folders above the first protected one keep what their parent hands down, so Users may still add
- * to them, as ProgramData lets everyone do; the check allows that there and nowhere else.
+ * and the result is checked before the next one. Every folder from the first one `protect` picks
+ * stops inheriting. The folders above it get the entries Windows gives ProgramData itself
+ * (-UsersMayCreate), set on each folder rather than inherited, so Users may still add to them; the
+ * check allows that there and nowhere else.
  */
 export function windowsFolderCommands(chain: readonly string[], protect: (dir: string) => boolean): string[] {
   const first = chain.findIndex(protect);
@@ -60,9 +61,11 @@ export function posixPolicyCommands(root: string, server: string, text: string, 
  * Administrators own NightSquawk, the policy root, the server's folder and the file (the protection
  * check reads each owner). The policy root stops inheriting from ProgramData (where Users may create
  * folders), and the folder and file below it inherit only SYSTEM and Administrators full control
- * plus Users read. NightSquawk keeps what ProgramData hands down, so other software can keep its own
- * folders there. The folders are taken over before the file is written, so nobody else can change
- * them in between. adminCommands() makes this one block, which stops at the first step that fails.
+ * plus Users read. NightSquawk gets the entries Windows gives ProgramData itself, so other software
+ * can keep its own folders there; they are set on it rather than inherited, because ProgramData's
+ * CREATOR OWNER entry can give the account that made it full control of it. The folders are taken
+ * over before the file is written, so nobody else can change them in between. adminCommands()
+ * makes this one block, which stops at the first step that fails.
  */
 export function windowsPolicyCommands(root: string, server: string, text: string, fileName = "policy.json"): string[] {
   const parent = win32.dirname(root);

@@ -107,11 +107,14 @@ mcp-guard init <server> --print   # the policy only
   first takes over the folders, one at a time with `icacls`, top first: Administrators own
   `NightSquawk`, the policy root and the server's folder. The policy root stops inheriting from
   ProgramData (where Users may create folders): only SYSTEM and Administrators get full control, and
-  Users read. `NightSquawk` keeps ProgramData's permissions, for other software's folders, so Users
-  may still add to it but not change, rename or delete what is there. After each folder the block
-  checks its owner and who else may change it, and it stops at a junction or symbolic link. Only then
-  does it write the file. It never changes a folder's contents recursively, because that could follow
-  a junction planted inside. Edit the policy from an elevated editor.
+  Users read. `NightSquawk` gets the entries Windows gives ProgramData itself, for other software's
+  folders, so Users may still add to it but not change, rename or delete what is there. They are set
+  on the folder rather than inherited: inherited, ProgramData's `CREATOR OWNER` entry can give the
+  account that made the folder, or the admin running the block, full control of it. After each
+  folder the block checks its owner and who else may change it, and it stops at a junction or
+  symbolic link. Only then does it write the file. It never changes a folder's contents
+  recursively, because that could follow a junction planted inside. Edit the policy from an
+  elevated editor.
 
 Paste the commands as printed. A path holding a typographic single quote (`‘ ’ ‚ ‛`) is quoted for
 PowerShell, which treats those as quote characters too. A chat client or word processor that

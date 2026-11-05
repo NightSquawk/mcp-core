@@ -80,7 +80,7 @@ export function adminCommands(platform: NodeJS.Platform, commands: string[]): Ad
 }
 
 /** SIDs the Windows commands name. */
-const SID = Object.freeze({ system: "*S-1-5-18", administrators: "*S-1-5-32-544", users: "*S-1-5-32-545" });
+const SID = Object.freeze({ system: "*S-1-5-18", administrators: "*S-1-5-32-544", users: "*S-1-5-32-545", creatorOwner: "*S-1-3-0" });
 
 interface PsHelper {
   name: string;
@@ -124,15 +124,22 @@ const PS_HELPERS: readonly PsHelper[] = [
     lines: [
       "# Take over one folder, top folder first: make it if it is missing, then Administrators own it and the entries anyone",
       "# else added are gone (one folder, never /T; /L changes a link itself, never where it leads). -Protect: it stops",
-      "# inheriting, and SYSTEM and Administrators have full control and Users read. Then check that nobody but SYSTEM,",
-      "# Administrators and TrustedInstaller can change, delete or take it over. -UsersMayCreate: Users may still add",
-      "# files and folders to it, as ProgramData lets everyone do.",
+      "# inheriting, and SYSTEM and Administrators have full control and Users read. -UsersMayCreate: it stops inheriting",
+      "# and gets the entries Windows gives ProgramData itself, so Users may still add files and folders to it. Inherited",
+      "# from ProgramData, its CREATOR OWNER entry can give the account that made the folder, or the admin running this,",
+      "# full control of it. Then check that nobody but SYSTEM, Administrators and TrustedInstaller can change, delete or",
+      "# take it over, or (without -UsersMayCreate) add to it.",
       "function Set-AdminFolder([string]$Path, [switch]$Protect, [switch]$UsersMayCreate) {",
       "  Assert-NoLink $Path",
       "  if ($null -eq (Get-Attributes $Path)) { New-Item -ItemType Directory -Path $Path | Out-Null }",
       `  icacls $Path /setowner '${SID.administrators}' /L`,
       "  icacls $Path /reset /L",
       `  if ($Protect) { icacls $Path /inheritance:r /grant:r '${SID.system}:(OI)(CI)F' '${SID.administrators}:(OI)(CI)F' '${SID.users}:(OI)(CI)RX' /L }`,
+      "  if ($UsersMayCreate) {",
+      `    icacls $Path /inheritance:r /grant:r '${SID.system}:(OI)(CI)F' '${SID.administrators}:(OI)(CI)F' '${SID.creatorOwner}:(OI)(CI)(IO)F' '${SID.users}:(OI)(CI)RX' /L`,
+      "    # Its own entry: Users may add files and folders to this folder and the folders below it, but not change files.",
+      `    icacls $Path /grant '${SID.users}:(CI)(WD,AD,WEA,WA)' /L`,
+      "  }",
       "  $acl = Get-Acl -LiteralPath $Path",
       "  Assert-NoLink $Path",
       "  if (-not ((Get-Attributes $Path) -band [IO.FileAttributes]::Directory)) { throw \"$Path is not a folder.\" }",
