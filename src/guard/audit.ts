@@ -41,6 +41,8 @@ export interface AuditEntry {
   idempotency_key?: string;
   approver?: string;
   approver_result?: string;
+  /** The approver is a person (a human denial counts toward the denial breaker, 6.7). */
+  approver_human?: boolean;
   http_status?: number | null;
   provider_ids?: string[];
   amount_cents?: number;

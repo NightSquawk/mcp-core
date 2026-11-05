@@ -524,6 +524,21 @@ describe("step 6: approval", () => {
     assert.equal(code(await exec(guard, "payment_create", pay())), "approval_denied", "only the change group is stopped");
   });
 
+  test("human denials in different server processes add up to the breaker", async (t) => {
+    const clock = manualClock("2026-11-04T10:00:00.000Z");
+    const no = { name: "none", human: true, request: async () => ({ result: "denied", approver: "none", human: true, reason: "no" }) };
+    const a = mk(t, { guard: { clock, approvers: { none: no } } });
+    const b = createGuard({ server: "toy", version: "1.0.0", env: a.sb.env, mode: "sandbox", protection: staticProtection(true, a.sb.policyPath), secrets: () => [SECRET], stateDir: a.sb.stateDir, log: () => {}, clock, approvers: { none: no } });
+    assert.equal(code(await exec(a.guard, "thing_create", { body: { a: 1 } })), "approval_denied");
+    clock.advance(31 * 60_000);
+    assert.equal(code(await exec(b, "thing_create", { body: { a: 2 } })), "approval_denied", "more than 30 minutes apart: no trip");
+    clock.advance(10 * 60_000);
+    assert.equal(code(await exec(a.guard, "thing_create", { body: { a: 3 } })), "approval_denied");
+    assert.equal(code(await exec(b, "thing_create", { body: { a: 4 } })), "kill_switch", "the other process's denial counted");
+    assert.match(b.kill.stopped("change"), /Denial breaker: 2 human denials within 30 minutes/);
+    assert.equal(lines(a.guard).filter((l) => l.approver_human === true).length, 3);
+  });
+
   test("a pending approval is stored, and a retry returns the same reference", async (t) => {
     let asked = 0;
     const later = { name: "none", human: true, request: async () => (asked++, { result: "pending", approver: "none", ref: "prop_1", url: "https://example.test/p/1" }) };

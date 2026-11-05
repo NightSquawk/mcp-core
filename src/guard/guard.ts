@@ -296,7 +296,6 @@ export class Guard<P extends BasePolicy = BasePolicy> {
   readonly #clock: () => Date;
   readonly #redactor: Redactor;
   readonly #approvers: Partial<Record<ApproverName, Approver>>;
-  readonly #denials = new Map<Group, number[]>();
   readonly #log: (line: string) => void;
 
   constructor(opts: GuardOptions<P>) {
@@ -886,8 +885,9 @@ export class Guard<P extends BasePolicy = BasePolicy> {
     base.approver_result = decision.result;
     if (decision.result === "denied") {
       release();
-      if (decision.human) this.#recordDenial(group);
-      return this.#refused(base, refuse("approval_denied", decision.reason));
+      const denied = this.#refused(base, refuse("approval_denied", decision.reason), decision.human ? { approver_human: true } : {});
+      if (decision.human) this.#denialBreaker(group);
+      return denied;
     }
     if (decision.result === "pending") {
       const stateNote = this.#finish(key, "pending", { pending: { ref: decision.ref, ...(decision.url ? { url: decision.url } : {}) } });
@@ -1117,12 +1117,23 @@ export class Guard<P extends BasePolicy = BasePolicy> {
     }
   }
 
-  #recordDenial(group: Group): void {
+  /**
+   * The denial breaker (6.7): two human denials in a group within 30 minutes trip it. They are
+   * counted from the audit log, which every process and session serving this server shares, so
+   * denials made in different ones add up. A log that cannot be read to count them trips it too.
+   */
+  #denialBreaker(group: Group): void {
     const now = this.#clock().getTime();
-    const recent = (this.#denials.get(group) ?? []).filter((t) => now - t < DENIAL_WINDOW_MS);
-    recent.push(now);
-    this.#denials.set(group, recent);
-    if (recent.length >= 2) this.kill.trip(group, `Denial breaker: ${recent.length} human denials within 30 minutes.`);
+    let denials: number;
+    try {
+      denials = this.audit
+        .read()
+        .filter((l) => l.group === group && l.reason_code === "approval_denied" && l.approver_human === true && now - Date.parse(l.ts) < DENIAL_WINDOW_MS).length;
+    } catch (e) {
+      this.kill.trip(group, `Denial breaker: the audit log could not be read to count human denials (${this.redact(String((e as Error)?.message ?? e))}).`);
+      return;
+    }
+    if (denials >= 2) this.kill.trip(group, `Denial breaker: ${denials} human denials within 30 minutes.`);
   }
 
   /**

@@ -497,7 +497,8 @@ The guard trips the kill switch by itself on any of these:
 - an audit log it cannot write;
 - a canary hit (section 2);
 - a call made under the external approver that the provider did not hold for a human;
-- the denial breaker: two human denials within 30 minutes.
+- the denial breaker: two human denials in a group within 30 minutes, counted from the audit log,
+  so denials in different sessions and server processes add up.
 
 Without the broker, an automatic trip lives in the agent's own state folder.
 
