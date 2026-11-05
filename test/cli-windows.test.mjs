@@ -13,7 +13,7 @@ import { cli, dist, openPolicy, tempDir } from "./cli-helpers.mjs";
 
 const { buildManifest } = await import(dist("guard/manifest.js"));
 const { commandLine } = await import(dist("cli/harness.js"));
-const { realProbes, TRUSTED_OWNER_SIDS } = await import(dist("guard/protection.js"));
+const { realProbes, TRUSTED_OWNER_SIDS, WINDOWS_CHANGE_RIGHTS } = await import(dist("guard/protection.js"));
 const { programDataDir } = await import(dist("guard/paths.js"));
 const { starterPolicyText, windowsPolicyCommands } = await import(dist("cli/init.js"));
 const { powershellBlock, psQuote } = await import(dist("cli/shell.js"));
@@ -409,6 +409,37 @@ test("the guard's owner probe reads real owners when the parent hands down a mod
   assert.equal(owners.length, 1);
   assert.match(String(owners[0].owner), /^S-1-5-/, JSON.stringify(owners));
   assert.equal(owners[0].owner, acl(file).owner);
+});
+
+test("the owner probe reads what this user may do: allow entries for its SIDs that apply to the path itself", { skip }, (t) => {
+  const dir = realpathSync.native(tempDir(t, "mcp-guard-rights-"));
+  const file = join(dir, "policy.json");
+  const sub = join(dir, "sub");
+  writeFileSync(file, "{}\n");
+  mkdirSync(sub);
+  const me = powershell("[Security.Principal.WindowsIdentity]::GetCurrent().User.Value").stdout.trim();
+  assert.match(me, /^S-1-5-/);
+  const rightsOf = (...paths) => {
+    const owners = realProbes().windowsOwners(paths);
+    assert.ok(owners, "the probe answered");
+    return paths.map((p) => owners.find((o) => o.path.toLowerCase() === p.toLowerCase())?.rights);
+  };
+  const [inherited] = rightsOf(file);
+  assert.ok(inherited & WINDOWS_CHANGE_RIGHTS.WRITE_DAC, `a file in this user's temp folder gives it full control: ${inherited}`);
+  try {
+    icacls(file, "/inheritance:r", "/grant:r", "*S-1-5-18:F");
+    icacls(sub, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F");
+    // Inherit-only: it applies to what sub holds, not to sub.
+    icacls(sub, "/grant", `*${me}:(OI)(CI)(IO)F`);
+    assert.deepEqual(rightsOf(file, sub), [0, 0], "only SYSTEM is named, and an inherit-only entry does not count");
+    icacls(file, "/grant", `*${me}:(WDAC)`);
+    const [dac] = rightsOf(file);
+    assert.ok(dac & WINDOWS_CHANGE_RIGHTS.WRITE_DAC, `WRITE_DAC: ${dac}`);
+    assert.equal(dac & WINDOWS_CHANGE_RIGHTS.FILE_WRITE_DATA, 0, "and no write");
+  } finally {
+    icacls(file, "/reset");
+    icacls(sub, "/reset");
+  }
 });
 
 test("ProgramData and its drive root have owners the policy check accepts, and neither is a link", { skip }, () => {

@@ -375,7 +375,8 @@ test("posixPart2: Alpine's /etc/doas.d/*.conf files are read too", () => {
 const WIN = "C:\\ProgramData\\NightSquawk\\mcp\\toy\\policy.json";
 const CHAIN = [WIN, "C:\\ProgramData\\NightSquawk\\mcp\\toy", "C:\\ProgramData\\NightSquawk\\mcp", "C:\\ProgramData\\NightSquawk", "C:\\ProgramData", "C:\\"];
 const USER_SID = "S-1-5-21-1111-2222-3333-1001";
-const owned = (owner, over = {}) => (paths) => paths.map((p) => ({ path: p, owner: over[p]?.owner ?? owner, reparse: over[p]?.reparse ?? false }));
+const owned = (owner, over = {}) => (paths) =>
+  paths.map((p) => ({ path: p, owner: over[p]?.owner ?? owner, reparse: over[p]?.reparse ?? false, rights: over[p]?.rights === undefined ? 0 : over[p].rights }));
 
 test("windowsPart1: every link must be owned by SYSTEM, Administrators or TrustedInstaller, with no reparse points", () => {
   const env = { ProgramData: "C:\\ProgramData" };
@@ -405,7 +406,7 @@ test("windowsPart1: every link must be owned by SYSTEM, Administrators or Truste
   assert.ok(partial.reasons.includes(`Could not read the owner of ${WIN}.`));
   const nullOwner = windowsPart1(WIN, probes({ platform: "win32", env, files, owners: owned(null) }));
   assert.equal(nullOwner.ok, false);
-  const caseless = windowsPart1(WIN, probes({ platform: "win32", env, files, owners: (paths) => paths.map((p) => ({ path: p.toUpperCase(), owner: "S-1-5-18", reparse: false })) }));
+  const caseless = windowsPart1(WIN, probes({ platform: "win32", env, files, owners: (paths) => paths.map((p) => ({ path: p.toUpperCase(), owner: "S-1-5-18", reparse: false, rights: 0 })) }));
   assert.equal(caseless.ok, true, "paths compare case-insensitively");
 });
 
@@ -447,17 +448,19 @@ test("checkProtection: a redirected ProgramData is noted", () => {
 });
 
 test("parseWindowsOwners and windowsOwnersScript", () => {
-  assert.deepEqual(parseWindowsOwners('[{"path":"C:\\\\a","owner":"S-1-5-18","reparse":false},{"path":"C:\\\\b","owner":null,"reparse":true}]'), [
-    { path: "C:\\a", owner: "S-1-5-18", reparse: false },
-    { path: "C:\\b", owner: null, reparse: true },
+  assert.deepEqual(parseWindowsOwners('[{"path":"C:\\\\a","owner":"S-1-5-18","reparse":false,"rights":0},{"path":"C:\\\\b","owner":null,"reparse":true,"rights":null}]'), [
+    { path: "C:\\a", owner: "S-1-5-18", reparse: false, rights: 0 },
+    { path: "C:\\b", owner: null, reparse: true, rights: null },
   ]);
-  assert.deepEqual(parseWindowsOwners('{"path":"C:\\\\a","owner":"S-1-5-32-544","reparse":false}'), [{ path: "C:\\a", owner: "S-1-5-32-544", reparse: false }], "PowerShell may unwrap a one-item array");
-  assert.deepEqual(parseWindowsOwners('[{"path":"C:\\\\a","owner":"BUILTIN\\\\Administrators"}]'), [{ path: "C:\\a", owner: null, reparse: false }], "only SIDs count");
+  assert.deepEqual(parseWindowsOwners('{"path":"C:\\\\a","owner":"S-1-5-32-544","reparse":false,"rights":262144}'), [{ path: "C:\\a", owner: "S-1-5-32-544", reparse: false, rights: 262144 }], "PowerShell may unwrap a one-item array");
+  assert.deepEqual(parseWindowsOwners('[{"path":"C:\\\\a","owner":"BUILTIN\\\\Administrators"}]'), [{ path: "C:\\a", owner: null, reparse: false, rights: null }], "only SIDs count");
   for (const bad of ["", "not json", "42", '[{"owner":"S-1-5-18"}]', "[null]"]) assert.equal(parseWindowsOwners(bad), null, bad);
   const script = windowsOwnersScript(["C:\\ProgramData\\Nightsquawk", "C:\\it's here"]);
   assert.ok(!/[\r\n]/.test(script), "one line, so -Command - runs it without a trailing blank line");
   assert.ok(script.includes("'C:\\it''s here'"), "single quotes are doubled inside a PowerShell literal");
   assert.ok(script.includes("GetOwner([System.Security.Principal.SecurityIdentifier])"));
+  assert.ok(script.includes("GetAccessRules($true, $true, $sid)"), "explicit and inherited entries, by SID");
+  assert.ok(script.includes("((([int]$e.PropagationFlags) -band 2) -eq 0)"), "inherit-only entries do not apply to the path itself");
 });
 
 test("realProbes: has the user-namespace and owner probes, and readText fails soft", () => {

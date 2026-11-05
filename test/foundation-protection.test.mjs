@@ -346,7 +346,8 @@ test("windowsPart1: a writable file or a folder the user can create in is a reas
 const ADMINS_SID = "S-1-5-32-544";
 const ME_SID = "S-1-5-21-1-2-3-1001";
 const WIN_CHAIN = [WIN_POLICY, "C:\\ProgramData\\NightSquawk\\mcp\\column", "C:\\ProgramData\\NightSquawk\\mcp", "C:\\ProgramData\\NightSquawk", "C:\\ProgramData", "C:\\"];
-const ownedBy = (map = {}, reparse = []) => (paths) => paths.map((p) => ({ path: p, owner: Object.hasOwn(map, p) ? map[p] : ADMINS_SID, reparse: reparse.includes(p) }));
+const ownedBy = (map = {}, reparse = [], rights = {}) => (paths) =>
+  paths.map((p) => ({ path: p, owner: Object.hasOwn(map, p) ? map[p] : ADMINS_SID, reparse: reparse.includes(p), rights: Object.hasOwn(rights, p) ? rights[p] : 0 }));
 
 test("windowsPart1: a user-owned file or folder is never protected, even when it is not writable right now (the owner can change the ACL back)", () => {
   const base = { platform: "win32", env: winEnv, files: { [WIN_POLICY]: fileStat() } };
@@ -368,11 +369,39 @@ test("windowsPart1: a user-owned file or folder is never protected, even when it
   assert.equal(P.windowsPart1(WIN_POLICY, fakeProbes({ ...base, owners: upper })).ok, true, "paths compare case-insensitively");
 });
 
+test("windowsPart1: a right to change the ACL or owner, or to delete, fails even with trusted owners and nothing writable now", () => {
+  const base = { platform: "win32", env: winEnv, files: { [WIN_POLICY]: fileStat() } };
+  const W = P.WINDOWS_CHANGE_RIGHTS;
+  const READ = 0x1200a9; // ReadAndExecute, Synchronize
+  const part = (rights) => P.windowsPart1(WIN_POLICY, fakeProbes({ ...base, owners: ownedBy({}, [], rights) }));
+  assert.deepEqual(part(Object.fromEntries(WIN_CHAIN.map((p) => [p, READ]))), { ok: true, reasons: [] }, "read and execute is fine anywhere");
+  // WRITE_DAC alone: the user grants itself write, changes the policy and puts the ACL back. The owner never changes.
+  const dac = part({ [WIN_POLICY]: W.WRITE_DAC | READ });
+  assert.deepEqual(dac, { ok: false, reasons: [`This user has WRITE_DAC on ${WIN_POLICY}, so it can change the policy or put another in its place.`] });
+  for (const name of ["FILE_WRITE_DATA", "FILE_APPEND_DATA", "DELETE", "WRITE_OWNER", "GENERIC_ALL", "GENERIC_WRITE"]) assert.equal(part({ [WIN_POLICY]: W[name] }).ok, false, name);
+  for (const dir of ["C:\\ProgramData\\NightSquawk\\mcp\\column", "C:\\ProgramData\\NightSquawk\\mcp"]) {
+    for (const name of ["FILE_WRITE_DATA", "FILE_DELETE_CHILD", "DELETE", "WRITE_DAC", "WRITE_OWNER", "GENERIC_ALL", "GENERIC_WRITE"]) assert.equal(part({ [dir]: W[name] }).ok, false, `${name} on ${dir}`);
+    assert.equal(part({ [dir]: W.FILE_APPEND_DATA | READ }).ok, true, `adding a subfolder to ${dir} changes no policy`);
+  }
+  assert.deepEqual(part({ "C:\\ProgramData\\NightSquawk\\mcp": W.FILE_WRITE_DATA | W.FILE_DELETE_CHILD }).reasons, [
+    "This user has FILE_ADD_FILE, FILE_DELETE_CHILD on C:\\ProgramData\\NightSquawk\\mcp, so it can change the policy or put another in its place.",
+  ]);
+  // Above the policy root users may add files and folders (ProgramData's own entries), but not delete, re-ACL or take over a folder.
+  const ADD = W.FILE_WRITE_DATA | W.FILE_APPEND_DATA | 0x110; // and write extended attributes and attributes
+  assert.deepEqual(part({ "C:\\ProgramData\\NightSquawk": ADD | READ, "C:\\ProgramData": ADD | READ, "C:\\": W.FILE_APPEND_DATA | READ }), { ok: true, reasons: [] });
+  for (const dir of ["C:\\ProgramData\\NightSquawk", "C:\\ProgramData", "C:\\"]) {
+    for (const name of ["FILE_DELETE_CHILD", "DELETE", "WRITE_DAC", "WRITE_OWNER", "GENERIC_ALL"]) assert.equal(part({ [dir]: W[name] }).ok, false, `${name} on ${dir}`);
+  }
+  assert.deepEqual(part({ [WIN_POLICY]: null }), { ok: false, reasons: [`Could not read what this user may do to ${WIN_POLICY}.`] });
+  const noRights = P.windowsPart1(WIN_POLICY, fakeProbes({ ...base, owners: (paths) => ownedBy()(paths).map(({ rights, ...rest }) => rest) }));
+  assert.equal(noRights.ok, false, "an answer without rights, as from an older double, fails closed");
+});
+
 test("windowsPart1: the ProgramData variable cannot make a folder the user owns count as protected", () => {
   const env = { ProgramData: "D:\\Users\\kim\\pd" };
   const policy = "D:\\Users\\kim\\pd\\NightSquawk\\mcp\\column\\policy.json";
   const files = { [policy]: fileStat() };
-  const mine = (paths) => paths.map((p) => ({ path: p, owner: ME_SID, reparse: false }));
+  const mine = (paths) => paths.map((p) => ({ path: p, owner: ME_SID, reparse: false, rights: 0 }));
   const part = P.windowsPart1(policy, fakeProbes({ platform: "win32", env, files, owners: mine }));
   assert.equal(part.ok, false);
   assert.ok(part.reasons.some((r) => r.includes(`is owned by ${ME_SID}`)), JSON.stringify(part.reasons));
@@ -392,9 +421,12 @@ test("windowsOwnersScript: one line, every PowerShell single-quote character dou
     const script = P.windowsOwnersScript([`C:\\a${q}b`]);
     assert.ok(script.includes(`C:\\a${q}${q}b`), `U+${cp.toString(16).toUpperCase()} is not doubled: ${JSON.stringify(script)}`);
   }
-  assert.deepEqual(P.parseWindowsOwners('[{"path":"C:\\\\a","owner":"S-1-5-18","reparse":false}]'), [{ path: "C:\\a", owner: "S-1-5-18", reparse: false }]);
-  assert.deepEqual(P.parseWindowsOwners('{"path":"C:\\\\a","owner":"S-1-5-18","reparse":true}'), [{ path: "C:\\a", owner: "S-1-5-18", reparse: true }], "PowerShell unwraps a one-item array");
-  assert.deepEqual(P.parseWindowsOwners('[{"path":"C:\\\\a","owner":"BUILTIN\\\\Administrators","reparse":false}]'), [{ path: "C:\\a", owner: null, reparse: false }], "a name is not a SID");
+  assert.deepEqual(P.parseWindowsOwners('[{"path":"C:\\\\a","owner":"S-1-5-18","reparse":false,"rights":1179817}]'), [{ path: "C:\\a", owner: "S-1-5-18", reparse: false, rights: 1179817 }]);
+  assert.deepEqual(P.parseWindowsOwners('{"path":"C:\\\\a","owner":"S-1-5-18","reparse":true,"rights":0}'), [{ path: "C:\\a", owner: "S-1-5-18", reparse: true, rights: 0 }], "PowerShell unwraps a one-item array");
+  assert.deepEqual(P.parseWindowsOwners('[{"path":"C:\\\\a","owner":"BUILTIN\\\\Administrators","reparse":false}]'), [{ path: "C:\\a", owner: null, reparse: false, rights: null }], "a name is not a SID, and no rights is unreadable");
+  for (const [raw, want] of [["\"2\"", null], ["1.5", null], ["null", null], ["-2147483648", -2147483648]]) {
+    assert.equal(P.parseWindowsOwners(`[{"path":"C:\\\\a","owner":"S-1-5-18","rights":${raw}}]`)[0].rights, want, `rights ${raw}: an integer, negative when GENERIC_READ is set`);
+  }
   for (const bad of ["", "not json", "5", "[5]", '[{"owner":"S-1-5-18"}]']) assert.equal(P.parseWindowsOwners(bad), null, JSON.stringify(bad));
 });
 

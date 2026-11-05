@@ -32,13 +32,19 @@ export interface RunResult {
   signal?: string;
 }
 
-/** Owner and reparse flag of one path (Windows). */
+/** Owner, reparse flag and this user's access to one path (Windows). */
 export interface WindowsOwnerInfo {
   path: string;
   /** Owner SID, or null when it could not be read. */
   owner: string | null;
   /** A junction, symlink or other reparse point. */
   reparse: boolean;
+  /**
+   * The access mask that the allow entries applying to the path itself (not inherit-only ones) give
+   * the current user or one of its enabled groups; null when it could not be read (fails closed).
+   * Deny entries are not subtracted, so a right one of them takes away still counts.
+   */
+  rights: number | null;
 }
 
 export interface ProtectionProbes {
@@ -62,8 +68,8 @@ export interface ProtectionProbes {
   /** The names in a folder, or null when it cannot be listed (/etc/doas.d). Optional for the same reason as readText. */
   listDir?(path: string): string[] | null;
   /**
-   * Windows: owner SID and reparse flag for each path, in one call; null when the
-   * owners cannot be read (fails closed). Optional for the same reason as readText.
+   * Windows: owner SID, reparse flag and this user's rights for each path, in one call;
+   * null when they cannot be read (fails closed). Optional for the same reason as readText.
    */
   windowsOwners?(paths: readonly string[]): WindowsOwnerInfo[] | null;
 }
@@ -134,13 +140,23 @@ export function psSingleQuoted(text: string): string {
   return out + "'";
 }
 
-/** One PowerShell line (stdin, no -EncodedCommand) that prints owner SID and reparse flag per path as JSON. */
+/**
+ * One PowerShell line (stdin, no -EncodedCommand) that prints, per path as JSON, the owner SID, the
+ * reparse flag and `rights`: the OR of the allow entries that apply to the path itself (not
+ * inherit-only ones, PropagationFlags 2) and name this process's user or one of its enabled groups
+ * (WindowsIdentity.Groups leaves out deny-only and disabled groups).
+ */
 export function windowsOwnersScript(paths: readonly string[]): string {
   return (
+    "$sid = [System.Security.Principal.SecurityIdentifier]; $id = [System.Security.Principal.WindowsIdentity]::GetCurrent(); " +
+    "$mine = @($id.User.Value) + @($id.Groups | ForEach-Object { $_.Value }); " +
     `$out = foreach ($p in @(${paths.map(psSingleQuoted).join(", ")})) { try { $i = Get-Item -LiteralPath $p -Force -ErrorAction Stop; ` +
-    "$o = (Get-Acl -LiteralPath $p -ErrorAction Stop).GetOwner([System.Security.Principal.SecurityIdentifier]).Value; " +
-    "[pscustomobject]@{ path = $p; owner = $o; reparse = [bool]($i.Attributes -band [System.IO.FileAttributes]::ReparsePoint) } } " +
-    "catch { [pscustomobject]@{ path = $p; owner = $null; reparse = $false } } }; ConvertTo-Json -InputObject @($out) -Compress"
+    "$acl = Get-Acl -LiteralPath $p -ErrorAction Stop; $o = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value; $r = 0; " +
+    "foreach ($e in $acl.GetAccessRules($true, $true, $sid)) { " +
+    "if (($e.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow) -and ((([int]$e.PropagationFlags) -band 2) -eq 0) -and ($mine -contains $e.IdentityReference.Value)) " +
+    "{ $r = $r -bor ([int]$e.FileSystemRights) } }; " +
+    "[pscustomobject]@{ path = $p; owner = $o; reparse = [bool]($i.Attributes -band [System.IO.FileAttributes]::ReparsePoint); rights = $r } } " +
+    "catch { [pscustomobject]@{ path = $p; owner = $null; reparse = $false; rights = $null } } }; ConvertTo-Json -InputObject @($out) -Compress"
   );
 }
 
@@ -157,7 +173,12 @@ export function parseWindowsOwners(stdout: string): WindowsOwnerInfo[] | null {
   const out: WindowsOwnerInfo[] = [];
   for (const x of list as Array<Record<string, unknown>>) {
     if (!x || typeof x !== "object" || typeof x.path !== "string") return null;
-    out.push({ path: x.path, owner: typeof x.owner === "string" && /^S-1-[0-9-]+$/.test(x.owner) ? x.owner : null, reparse: x.reparse === true });
+    out.push({
+      path: x.path,
+      owner: typeof x.owner === "string" && /^S-1-[0-9-]+$/.test(x.owner) ? x.owner : null,
+      reparse: x.reparse === true,
+      rights: typeof x.rights === "number" && Number.isInteger(x.rights) ? x.rights : null,
+    });
   }
   return out;
 }
@@ -733,6 +754,33 @@ export function parseRegDwords(stdout: string): Record<string, number> {
 
 const UAC_KEY = "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System";
 
+/** Win32 access rights that let a user write a file or add to a folder, delete either, or change its ACL or owner. */
+export const WINDOWS_CHANGE_RIGHTS = Object.freeze({
+  FILE_WRITE_DATA: 0x2,
+  FILE_APPEND_DATA: 0x4,
+  FILE_DELETE_CHILD: 0x40,
+  DELETE: 0x10000,
+  WRITE_DAC: 0x40000,
+  WRITE_OWNER: 0x80000,
+  GENERIC_ALL: 0x10000000,
+  GENERIC_WRITE: 0x40000000,
+});
+
+const W = WINDOWS_CHANGE_RIGHTS;
+/** Not on the policy file: writing it, deleting it, or changing its ACL or owner. */
+const FILE_RIGHTS = W.FILE_WRITE_DATA | W.FILE_APPEND_DATA | W.DELETE | W.WRITE_DAC | W.WRITE_OWNER | W.GENERIC_ALL | W.GENERIC_WRITE;
+/** Not on a folder from the policy's up to the policy root: adding a file, deleting what it holds or the folder, or changing its ACL or owner. */
+const FOLDER_RIGHTS = W.FILE_WRITE_DATA | W.FILE_DELETE_CHILD | W.DELETE | W.WRITE_DAC | W.WRITE_OWNER | W.GENERIC_ALL | W.GENERIC_WRITE;
+/** Above the policy root users may add files (ProgramData's own entries), but not delete, re-ACL or take over a folder. */
+const UPPER_RIGHTS = W.FILE_DELETE_CHILD | W.DELETE | W.WRITE_DAC | W.WRITE_OWNER | W.GENERIC_ALL;
+
+/** The names of the rights set in a mask; on a folder, FILE_WRITE_DATA is FILE_ADD_FILE. */
+function rightNames(mask: number, folder: boolean): string[] {
+  return Object.entries(WINDOWS_CHANGE_RIGHTS)
+    .filter(([, bit]) => (mask & bit) !== 0)
+    .map(([name]) => (folder && name === "FILE_WRITE_DATA" ? "FILE_ADD_FILE" : name));
+}
+
 export function windowsPart1(policyPath: string, probes: ProtectionProbes): ProtectionPart {
   const reasons: string[] = [];
   if (!probes.lstat(policyPath)) return { ok: false, reasons: [`No policy file at ${policyPath}.`] };
@@ -750,6 +798,7 @@ export function windowsPart1(policyPath: string, probes: ProtectionProbes): Prot
     if (parent === dir || !parent.toLowerCase().startsWith(top)) break;
     dir = parent;
   }
+  const inner = chain.length; // the file and the folders up to the policy root
   // Above that, up to the drive root, only owners and links are checked. Users may create files in
   // ProgramData and NightSquawk, but whoever owns a folder above the policy can replace everything below it.
   for (let parent = win32.dirname(dir); parent !== dir; parent = win32.dirname(parent)) {
@@ -758,16 +807,22 @@ export function windowsPart1(policyPath: string, probes: ProtectionProbes): Prot
   }
   // "Not writable right now" is not enough: an owner can always change the ACL back (attrib -R,
   // removing a self-added deny entry). Every link must be owned by SYSTEM, Administrators or
-  // TrustedInstaller, and none may be a junction or symlink.
+  // TrustedInstaller, and none may be a junction or symlink. Nor may an allow entry give this user
+  // the right to change a link's ACL or owner or to delete it: with WRITE_DAC alone it can grant
+  // itself write, change the policy and put the ACL back, and the owner never changes.
   if (probes.windowsOwners) {
     const owners = probes.windowsOwners(chain);
     if (!owners) reasons.push("Could not read the owners of the policy file and its folders.");
     else {
-      for (const p of chain) {
+      for (const [i, p] of chain.entries()) {
         const info = owners.find((o) => o.path.toLowerCase() === p.toLowerCase());
         if (!info || !info.owner) reasons.push(`Could not read the owner of ${p}.`);
         else if (!TRUSTED_OWNER_SIDS.includes(info.owner)) reasons.push(`${p} is owned by ${info.owner}, not SYSTEM, Administrators or TrustedInstaller.`);
         if (info?.reparse) reasons.push(`${p} is a junction or symbolic link.`);
+        if (!info?.owner) continue;
+        const granted = typeof info.rights === "number" ? info.rights & (i === 0 ? FILE_RIGHTS : i < inner ? FOLDER_RIGHTS : UPPER_RIGHTS) : null;
+        if (granted === null) reasons.push(`Could not read what this user may do to ${p}.`);
+        else if (granted) reasons.push(`This user has ${rightNames(granted, i > 0).join(", ")} on ${p}, so it can change the policy or put another in its place.`);
       }
     }
   }

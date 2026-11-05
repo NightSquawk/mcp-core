@@ -167,7 +167,11 @@ off. The one exception is a server reporting sandbox mode, such as a provider te
   the policy's folder up to the policy root, `%ProgramData%\NightSquawk\mcp`. The file, those
   folders and every folder above them up to the drive root (`NightSquawk`, `%ProgramData%` and `C:\`)
   are owned by Administrators, SYSTEM or TrustedInstaller, and none of them is a junction or symbolic
-  link. A ProgramData moved to another drive through a junction fails this.
+  link. A ProgramData moved to another drive through a junction fails this. No allow entry for the
+  agent's user or one of its groups may give it `WRITE_DAC`, `WRITE_OWNER`, `DELETE` or
+  `FILE_DELETE_CHILD` on any of them, or the right to write the file or add a file to a folder up to
+  the policy root: with `WRITE_DAC` alone it can grant itself write, change the policy and put the
+  ACL back. Deny entries are not counted, so a right one of them takes away still fails the check.
 
 **Part 2: the agent's OS user cannot become admin without a factor it lacks.**
 
