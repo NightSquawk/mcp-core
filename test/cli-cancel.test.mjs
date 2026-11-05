@@ -100,6 +100,7 @@ test("cancel releases the call's ledger reservation, so the retry it allows is n
   const line = { server: "column", version: "t", guard: "t", session: "s", tool: "column_spend", tier: "spend", group: "spend", mode: "live", dry_run: false };
   audit.append({ ...line, operation: "create_transfer", decision: "pending", idempotency_key: key, amount_cents: 500, currency: "USD" });
   assert.equal(ledger.snapshot().spendToday("USD"), 500);
+  clock.advance(60_000); // the person cancels the approval at the provider first
 
   const out = await cli(["cancel", key.slice(0, 20), "--json"], { env: sb.env, clock, interactive: true, answers: ["APR-123"] });
   assert.equal(out.code, 0);
@@ -111,6 +112,69 @@ test("cancel releases the call's ledger reservation, so the retry it allows is n
   // A ledger rebuilt from the audit log releases it again.
   rmSync(ledger.file);
   assert.equal(new Ledger(dir, { clock, audit }).snapshot().spendToday("USD"), 0);
+});
+
+test("cancel releases only the reservation it cancelled, not one a retry made the moment the key was free", async (t) => {
+  const sb = sandbox(t);
+  const clock = manualClock();
+  const dir = sb.serverState("column");
+  const { key, store } = entry(sb, clock, "column", "pending");
+  const audit = new AuditLog(dir, "column", { clock });
+  const ledger = new Ledger(dir, { clock, audit });
+  const line = { server: "column", version: "t", guard: "t", session: "s", tool: "column_spend", tier: "spend", group: "spend", mode: "live", dry_run: false };
+  ledger.settle(ledger.reserve({ group: "spend", op: "create_transfer", key, cents: 500, currency: "USD" }, () => null).id, "pending");
+  audit.append({ ...line, operation: "create_transfer", decision: "pending", idempotency_key: key, amount_cents: 500, currency: "USD" });
+  clock.advance(60_000); // the person cancels the approval at the provider first
+  // Another server process retries as soon as cancel frees the key: it claims the entry, reserves,
+  // and records its call, all before this cancel releases anything or writes its own line.
+  const cancel = IdempotencyStore.prototype.cancel;
+  t.after(() => {
+    IdempotencyStore.prototype.cancel = cancel;
+  });
+  IdempotencyStore.prototype.cancel = function (...args) {
+    IdempotencyStore.prototype.cancel = cancel;
+    const out = cancel.apply(this, args);
+    const retry = new IdempotencyStore(dir, { clock });
+    assert.equal(retry.begin(key, { operation: "create_transfer", request_hash: "sha256:x", day: DAY }).claimed, true, "the retry claims the freed key");
+    ledger.settle(ledger.reserve({ group: "spend", op: "create_transfer", key, cents: 700, currency: "USD" }, () => null).id, "pending");
+    retry.finish(key, "pending", { pending: { ref: "APR-456" } });
+    audit.append({ ...line, operation: "create_transfer", decision: "pending", idempotency_key: key, amount_cents: 700, currency: "USD" });
+    return out;
+  };
+
+  const out = await cli(["cancel", key.slice(0, 20), "--json"], { env: sb.env, clock, interactive: true, answers: ["APR-123"] });
+  assert.equal(out.code, 0);
+  assert.equal(out.json.ledger_released, 1, "the cancelled call's reservation only");
+  assert.equal(statusOf(store, key), "pending", "the retry holds the key");
+  assert.equal(ledger.snapshot().spendToday("USD"), 700, "the retry's 700 still counts");
+  rmSync(ledger.file);
+  assert.equal(new Ledger(dir, { clock, audit }).snapshot().spendToday("USD"), 700, "and still counts in a ledger rebuilt from the audit log");
+});
+
+test("cancel refuses when a retry re-claimed the entry while the person was confirming", async (t) => {
+  const sb = sandbox(t);
+  const clock = manualClock();
+  const { key, store } = entry(sb, clock, "column", "unknown");
+  clock.advance(6 * 60_000); // in_flight past five minutes reads as unknown
+  const suffix = key.slice(-12);
+  const retry = new IdempotencyStore(sb.serverState("column"), { clock });
+  const r = await cli(["cancel", suffix, "--json"], {
+    env: sb.env,
+    clock,
+    interactive: true,
+    // The person checks the provider for the first attempt; meanwhile a retry re-claims it, and its
+    // process dies too, so the entry reads as unknown again.
+    answers: [
+      () => {
+        assert.ok(retry.reclaimUnknown(key));
+        clock.advance(6 * 60_000);
+        return suffix;
+      },
+    ],
+  });
+  assert.equal(r.code, 1);
+  assert.match(r.json.error, /changed while you were confirming/);
+  assert.equal(statusOf(store, key), "unknown", "the newer attempt is left for the person to check");
 });
 
 test("a pending call without a reference needs 'cancelled'", async (t) => {

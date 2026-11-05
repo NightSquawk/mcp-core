@@ -175,6 +175,23 @@ test("idempotency: cancel needs a unique match and only reopens a call that may 
   assert.equal(s.lookup([live]).status, "in_flight");
 });
 
+test("idempotency: cancel with the attempt confirmed refuses another status, or an entry a retry re-claimed", (t) => {
+  const clock = manualClock();
+  const s = new I.IdempotencyStore(tempDir(t), { clock });
+  const k = I.deriveKey(input({ canonicalBody: "u" }));
+  s.begin(k, info);
+  s.finish(k, "unknown");
+  const confirmed = s.entries().find((e) => e.key === k);
+  clock.advance(1000);
+  assert.ok(s.reclaimUnknown(k), "a retry re-claims it while the person confirms");
+  s.finish(k, "unknown");
+  assert.equal(s.cancel(k, { status: confirmed.status, created_at: confirmed.created_at }), null, "another attempt than the one confirmed");
+  const now = s.entries().find((e) => e.key === k);
+  assert.equal(s.cancel(k, { status: "pending", created_at: now.created_at }), null, "another status than the one confirmed");
+  assert.equal(s.lookup([k]).status, "unknown", "nothing changed");
+  assert.equal(s.cancel(k, { status: now.status, created_at: now.created_at })?.status, "failed");
+});
+
 test("idempotency: an empty prefix never matches, even with a single entry", (t) => {
   const s = new I.IdempotencyStore(tempDir(t), { clock: manualClock() });
   const k = I.deriveKey(input());

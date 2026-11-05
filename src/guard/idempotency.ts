@@ -207,10 +207,12 @@ export class IdempotencyStore {
   /**
    * Mark a pending or unknown-outcome entry failed (mcp-guard cancel), so the same
    * request may run again. The prefix (or suffix) must match exactly one entry; a
-   * completed or currently running call is never reopened. This does not cancel a
-   * hold at the provider.
+   * completed or currently running call is never reopened. With `expect`, only the
+   * attempt the person confirmed is: another status, or another created_at (a retry
+   * re-claimed the entry meanwhile), returns null. This does not cancel a hold at the
+   * provider.
    */
-  cancel(keyPrefix: string): IdemEntry | null {
+  cancel(keyPrefix: string, expect?: { status: IdemStatus; created_at: string }): IdemEntry | null {
     const needle = keyPrefix.trim();
     if (!needle) return null;
     return withFileLock(this.#lock, () => {
@@ -219,6 +221,7 @@ export class IdempotencyStore {
       if (match.length !== 1) return null;
       const e = this.#normalize(match[0]);
       if (e.status !== "pending" && e.status !== "unknown") return null;
+      if (expect && (e.status !== expect.status || e.created_at !== expect.created_at)) return null;
       f.entries[e.key] = { ...match[0], status: "failed", finished_at: this.#clock().toISOString() };
       writeJsonFile(this.file, f);
       return f.entries[e.key];

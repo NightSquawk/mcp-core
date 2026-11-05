@@ -23,7 +23,8 @@ export function test(name, options, fn) {
 }
 
 /**
- * A fake CliIo. `answers` are returned in order by ask(); each question is kept.
+ * A fake CliIo. `answers` are returned in order by ask(); each question is kept. An answer
+ * that is a function is called with the question, and what it returns is the answer.
  * `protect` is true/false (a static report) or a function; omitted, the real
  * check runs (it never counts an NST_MCP_POLICY_DIR override as protected).
  */
@@ -48,7 +49,8 @@ export function fakeIo(opts = {}) {
     ask: async (q) => {
       asked.push(q);
       if (!answers.length) throw new Error(`fakeIo: unexpected question: ${q}`);
-      return answers.shift();
+      const a = answers.shift();
+      return typeof a === "function" ? a(q) : a;
     },
     clock: opts.clock ?? manualClock(),
     uid: opts.uid === undefined ? 1000 : opts.uid,

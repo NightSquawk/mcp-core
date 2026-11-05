@@ -151,17 +151,21 @@ test("ledger: a corrupt ledger file is rebuilt from the audit log", (t) => {
   assert.equal(noAudit.snapshot().spendToday("USD"), 0, "without an audit log to rebuild from, it starts empty");
 });
 
-test("ledger: release frees only the open reservations of that call", (t) => {
+test("ledger: release frees only the open reservations held() read, of that call", (t) => {
   const l = new Ledger(tempDir(t), { clock: manualClock("2026-11-04T12:00:00.000Z") });
   const spend = (key, cents) => ok(l.reserve({ group: "spend", op: "pay", key, cents, currency: "USD" }, always));
   l.settle(spend("A", 100), "pending");
   spend("A", 200); // still reserved: its process died mid-call
   l.settle(spend("A", 400), "done");
   l.settle(spend("B", 800), "pending");
-  assert.equal(l.release("A"), 2);
-  assert.equal(l.snapshot().spendToday("USD"), 1200, "A's completed call and B's still count");
-  assert.equal(l.release("A"), 0, "nothing left to release");
-  assert.equal(l.release("nobody"), 0);
+  const held = l.held("A");
+  assert.equal(held.length, 2, "the pending and the reserved one, not the completed one");
+  spend("A", 1600); // a retry that claimed the key after held() was read
+  assert.equal(l.release("A", held), 2);
+  assert.equal(l.snapshot().spendToday("USD"), 2800, "A's completed call, A's retry and B's call still count");
+  assert.equal(l.release("A", held), 0, "nothing left to release");
+  assert.equal(l.release("B", held), 0, "another call's ids release nothing");
+  assert.equal(l.release("nobody", []), 0);
 });
 
 test("ledger: a retry under the key of an unknown-outcome call replaces it, in the check and the totals", (t) => {
@@ -194,16 +198,26 @@ test("ledger: a rebuild counts an unknown-outcome call and its retry under the s
   assert.equal(s.count("spend", "day"), 2);
 });
 
-test("ledger: a rebuild releases what mcp-guard cancel released, and counts a later retry", (t) => {
+test("ledger: a rebuild releases what mcp-guard cancel released, and counts a retry, even one written before the cancel line", (t) => {
   const dir = tempDir(t);
   const clock = manualClock("2026-11-04T12:00:00.000Z");
   const audit = new AuditLog(dir, "column", { clock });
   const base = { server: "column", version: "t", guard: "t", session: "s", tool: "column_spend", tier: "spend", group: "spend", mode: "live", dry_run: false, currency: "USD" };
+  const cancelLine = (key, cancelledAt) =>
+    audit.append({ ...base, tool: "mcp-guard", operation: "cli.cancel", tier: "unknown", group: null, mode: "none", decision: "alert", alert: CANCEL_ALERT, idempotency_key: key, currency: undefined, ...(cancelledAt ? { cancelled_at: cancelledAt } : {}) });
   audit.append({ ...base, operation: "pay", decision: "pending", idempotency_key: "A", amount_cents: 200 });
   audit.append({ ...base, operation: "pay", decision: "unknown_outcome", idempotency_key: "B", amount_cents: 300 });
-  audit.append({ ...base, tool: "mcp-guard", operation: "cli.cancel", tier: "unknown", group: null, mode: "none", decision: "alert", alert: CANCEL_ALERT, idempotency_key: "A", currency: undefined });
+  audit.append({ ...base, operation: "pay", decision: "pending", idempotency_key: "C", amount_cents: 4000 });
+  audit.append({ ...base, operation: "pay", decision: "pending", idempotency_key: "D", amount_cents: 50000 });
+  clock.advance(60_000); // the person checks the provider, then cancels
+  cancelLine("A", clock().toISOString());
   audit.append({ ...base, operation: "pay", decision: "executed", idempotency_key: "A", amount_cents: 200 });
-  assert.equal(new Ledger(dir, { clock, audit }).snapshot().spendToday("USD"), 500, "B's 300 and A's retry; not A's cancelled call");
+  // C's retry claimed the key the moment cancel freed it, and its line was written before cancel's own.
+  const cancelledAt = clock().toISOString();
+  audit.append({ ...base, operation: "pay", decision: "pending", idempotency_key: "C", amount_cents: 4000 });
+  cancelLine("C", cancelledAt);
+  cancelLine("D"); // a cancel line without cancelled_at is cut at its own time
+  assert.equal(new Ledger(dir, { clock, audit }).snapshot().spendToday("USD"), 4500, "B's 300, A's retry and C's retry; not the cancelled calls");
 });
 
 test("ledger: owner-only file", { skip: process.platform === "win32" }, (t) => {

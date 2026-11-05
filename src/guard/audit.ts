@@ -49,6 +49,12 @@ export interface AuditEntry {
   currency?: string;
   duration_ms?: number;
   alert?: string;
+  /**
+   * When mcp-guard cancel marked the entry failed (on its cli_cancel line). A ledger rebuilt from
+   * the log releases only what the call recorded before then, not a retry that claimed the key at
+   * once and was written before this line.
+   */
+  cancelled_at?: string;
   note?: string;
   agent_says?: string;
 }

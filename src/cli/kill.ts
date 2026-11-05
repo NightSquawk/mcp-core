@@ -308,19 +308,34 @@ export async function cancelCommand(args: CancelArgs, io: CliIo): Promise<Outcom
     ].join("\n");
   }
   await confirmTyped(io, what, expected);
-  const changed = store.cancel(entry.key);
+  // The call's reservations still count against the spend and rate caps: they are released too,
+  // or the retry this allows is refused for the amount of the call it replaces. They are read
+  // first: once the entry is failed, another server process may claim the key and reserve for its
+  // retry before the release below, and that reservation must keep counting.
+  const ledger = new Ledger(ctx.stateDir, { clock: io.clock, audit: new AuditLog(ctx.stateDir, ctx.server, { clock: io.clock }) });
+  let held: string[] | Error;
+  try {
+    held = ledger.held(entry.key);
+  } catch (e) {
+    held = e as Error;
+  }
+  // Only the attempt confirmed above: a retry that re-claimed the entry meanwhile is another call.
+  const changed = store.cancel(entry.key, { status: entry.status, created_at: entry.created_at });
   if (!changed) throw new CliError(`${where} changed while you were confirming; mcp-guard status ${ctx.server} shows it now.`, EXIT.fail, data);
-  // The call's reservation still counts against the spend and rate caps: release it too, or the
-  // retry this allows is refused for the amount of the call it replaces.
   const warnings: string[] = [];
   let released = 0;
   try {
-    released = new Ledger(ctx.stateDir, { clock: io.clock, audit: new AuditLog(ctx.stateDir, ctx.server, { clock: io.clock }) }).release(entry.key);
+    if (held instanceof Error) throw held;
+    released = ledger.release(entry.key, held);
   } catch (e) {
     warnings.push(`The ledger still counts this call against today's caps (${(e as Error).message}); it stops counting after 49 hours.`);
   }
-  // Written as cli_cancel (CANCEL_ALERT): a ledger rebuilt from the audit log releases the call again.
-  const auditWarning = cliAlert(io, ctx, "cancel", `marked ${entry.status} entry failed; released ${released} ledger reservation(s)`, { idempotency_key: entry.key });
+  // Written as cli_cancel (CANCEL_ALERT): a ledger rebuilt from the audit log releases the call
+  // again, but only what it recorded before cancelled_at.
+  const auditWarning = cliAlert(io, ctx, "cancel", `marked ${entry.status} entry failed; released ${released} ledger reservation(s)`, {
+    idempotency_key: entry.key,
+    ...(changed.finished_at ? { cancelled_at: changed.finished_at } : {}),
+  });
   if (auditWarning) warnings.push(auditWarning);
   return {
     code: EXIT.ok,

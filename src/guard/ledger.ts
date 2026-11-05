@@ -108,7 +108,10 @@ export class Ledger {
     const events: LedgerEvent[] = [];
     for (const l of this.#audit?.read() ?? []) {
       if (l.alert === CANCEL_ALERT && typeof l.idempotency_key === "string") {
-        for (const e of events) if (e.key === l.idempotency_key && OPEN.has(e.status)) e.status = "failed";
+        // Only what the call recorded before the cancel. A retry claims the key once cancel frees
+        // it, and may be written before this line: it is a new call and keeps counting.
+        const cut = typeof l.cancelled_at === "string" && !Number.isNaN(Date.parse(l.cancelled_at)) ? Date.parse(l.cancelled_at) : Date.parse(l.ts);
+        for (const e of events) if (e.key === l.idempotency_key && OPEN.has(e.status) && e.t < cut) e.status = "failed";
         continue;
       }
       // read() already drops lines that are not audit lines; also skip ones with fields of the wrong type.
@@ -178,17 +181,27 @@ export class Ledger {
     });
   }
 
+  /** The ids of the reservations a call still holds (reserved, pending or unknown), for release(). */
+  held(key: string): string[] {
+    return this.#load()
+      .events.filter((e) => e.key === key && OPEN.has(e.status))
+      .map((e) => e.id);
+  }
+
   /**
-   * Release every reservation a call still holds (mcp-guard cancel), so that it stops counting
-   * against the caps and the retry that cancel allows can run. Completed calls are kept.
-   * Returns how many were released.
+   * Release reservations a call still holds (mcp-guard cancel), so that they stop counting
+   * against the caps and the retry that cancel allows can run. Only `ids` are released, as
+   * held() read them before the cancel: a retry that claims the key once it is free reserves
+   * its own, and that one must keep counting. Completed calls are kept. Returns how many were
+   * released.
    */
-  release(key: string): number {
+  release(key: string, ids: readonly string[]): number {
+    const only = new Set(ids);
     return withFileLock(this.#lock, () => {
       const f = this.#load();
       let n = 0;
       for (const e of f.events) {
-        if (e.key === key && OPEN.has(e.status)) {
+        if (e.key === key && OPEN.has(e.status) && only.has(e.id)) {
           e.status = "failed";
           n++;
         }
