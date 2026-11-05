@@ -602,6 +602,7 @@ test("windows: PowerShell commands for an admin-owned file, and where each clien
     `$content = @'\n${text}'@`,
     `[System.IO.File]::WriteAllText('${dropIn}', $content)`,
     `icacls '${dropIn}' /setowner '*S-1-5-32-544' /C`,
+    `icacls '${dropIn}' /reset /C`,
     `icacls '${dropIn}' /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' '*S-1-5-32-545:RX'`,
   ]);
   assert.deepEqual(adminFileCommands("linux", "/etc/cursor/hooks.json", text), [

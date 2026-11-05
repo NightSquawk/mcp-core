@@ -93,7 +93,12 @@ export interface ToolDecision {
 const json = (v: unknown): string => `${JSON.stringify(v, null, 2)}\n`;
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
-/** Admin commands that write one file outside the policy root (root-owned, 0644; Windows: Administrators own it, Users read). */
+/**
+ * Admin commands that write one file outside the policy root (root-owned, 0644; Windows: Administrators
+ * own it, Users read). On Windows, /reset drops every explicit entry the new file was created with,
+ * such as full control for the admin who wrote it when its folder passes nothing down: /grant:r only
+ * replaces the entries it names. The owner is set first, so the reset file stays writable for icacls.
+ */
 export function adminFileCommands(platform: NodeJS.Platform, file: string, text: string): string[] {
   if (platform === "win32") {
     return [
@@ -101,6 +106,7 @@ export function adminFileCommands(platform: NodeJS.Platform, file: string, text:
       `$content = @'\n${text}'@`,
       `[System.IO.File]::WriteAllText(${psQuote(file)}, $content)`,
       `icacls ${psQuote(file)} /setowner '${SID.administrators}' /C`,
+      `icacls ${psQuote(file)} /reset /C`,
       `icacls ${psQuote(file)} /inheritance:r /grant:r '${SID.system}:F' '${SID.administrators}:F' '${SID.users}:RX'`,
     ];
   }
