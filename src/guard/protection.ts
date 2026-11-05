@@ -452,7 +452,9 @@ export function windowsPart1(policyPath: string, probes: ProtectionProbes): Prot
   const reasons: string[] = [];
   if (!probes.lstat(policyPath)) return { ok: false, reasons: [`No policy file at ${policyPath}.`] };
   if (probes.canOpenForWrite(policyPath)) reasons.push(`This user can open ${policyPath} for writing.`);
-  const top = win32.join(programDataDir(probes.env), "NightSquawk").toLowerCase();
+  // The policy root. NightSquawk above it keeps ProgramData's permissions (mcp-guard init leaves it
+  // so, for other software's folders), so users may create files there; only its owner counts.
+  const top = win32.join(programDataDir(probes.env), "NightSquawk", "mcp").toLowerCase();
   const chain = [policyPath];
   let dir = win32.dirname(policyPath);
   for (;;) {
@@ -464,7 +466,7 @@ export function windowsPart1(policyPath: string, probes: ProtectionProbes): Prot
     dir = parent;
   }
   // Above that, up to the drive root, only owners and links are checked. Users may create files in
-  // ProgramData itself, but whoever owns a folder above the policy can replace everything below it.
+  // ProgramData and NightSquawk, but whoever owns a folder above the policy can replace everything below it.
   for (let parent = win32.dirname(dir); parent !== dir; parent = win32.dirname(parent)) {
     chain.push(parent);
     dir = parent;

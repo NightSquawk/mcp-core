@@ -28,7 +28,11 @@ the guard's inputs, or closes a path around the server.
 | Supply chain | a bad release reaching your machine the day it ships | a compromised build with valid provenance | 10 |
 
 `mcp-guard` never writes client config and never elevates. For admin-owned files it prints the
-commands (exit code 3) and you run them yourself, in your own terminal, after reading them.
+commands (exit code 3) and you run them yourself, in your own terminal, after reading them. On
+Windows, where any user may create folders in ProgramData, the commands first make Administrators
+own the client's folder (`%ProgramData%\Cursor`, `C:\Program Files\ClaudeCode`) and each folder below
+it, and write nothing through a junction or symbolic link. A file already there is deleted and
+written again: whoever made it may still hold it open.
 **Never run `sudo mcp-guard`** or an elevated `mcp-guard`: it reports what the user running it
 can do, so as root it checks root's view, and files it writes into a state folder become root's.
 It warns when it runs as root.
@@ -94,10 +98,13 @@ mcp-guard init <server> --print   # the policy only
 `init` prints the commands and exits 3. Read them, then run them in your own terminal.
 - **Linux:** they create root-owned folders (0755) and the file (0644) through `sudo tee`. Edit
   the policy later with `sudoedit`: your editor runs as you, and sudo writes the file as root.
-- **Windows (UNVERIFIED):** they write the file, then use `icacls` to make Administrators own every
-  folder from `NightSquawk` down. The policy root stops inheriting from ProgramData (where Users may
-  create folders): only SYSTEM and Administrators get full control, and Users read. Edit it from an
-  elevated editor.
+- **Windows (UNVERIFIED):** they first take over the folders, one at a time with `icacls`:
+  Administrators own `NightSquawk`, the policy root and the server's folder. The policy root stops
+  inheriting from ProgramData (where Users may create folders): only SYSTEM and Administrators get
+  full control, and Users read. `NightSquawk` keeps ProgramData's permissions, for other software's
+  folders. Then they write the file, and write nothing if one of those folders or the file is a
+  junction or symbolic link. They never change a folder's contents recursively: that could follow a
+  junction planted inside. Edit the policy from an elevated editor.
 
 Paste the commands as printed. A path holding a typographic single quote (`‘ ’ ‚ ‛`) is quoted for
 PowerShell, which treats those as quote characters too. A chat client or word processor that
@@ -147,10 +154,10 @@ off. The one exception is a server reporting sandbox mode, such as a provider te
   holding each link and every folder it leads to, however many links deep. Inside a user namespace
   (rootless containers, `unshare -Ur`) owners can be forged, so it fails there.
 - Windows: opening the file for writing fails, and creating a probe file fails in each folder from
-  the policy's folder up to `%ProgramData%\NightSquawk`. The file, those folders and every folder
-  above them up to the drive root (`%ProgramData%` and `C:\`) are owned by Administrators, SYSTEM or
-  TrustedInstaller, and none of them is a junction or symbolic link. A ProgramData moved to another
-  drive through a junction fails this.
+  the policy's folder up to the policy root, `%ProgramData%\NightSquawk\mcp`. The file, those
+  folders and every folder above them up to the drive root (`NightSquawk`, `%ProgramData%` and `C:\`)
+  are owned by Administrators, SYSTEM or TrustedInstaller, and none of them is a junction or symbolic
+  link. A ProgramData moved to another drive through a junction fails this.
 
 **Part 2: the agent's OS user cannot become admin without a factor it lacks.**
 
@@ -232,7 +239,9 @@ It prints two fragments:
   change it too.
 - **`requirements.toml`, an admin floor** (`/etc/codex`; `%ProgramData%\OpenAI\Codex` on
   Windows): it rules out the full-access sandbox (and with it `--yolo`) and Codex's automatic
-  reviewer for everyone. The floor is UNVERIFIED until an admin installs it: then
+  reviewer for everyone. On Windows any user may create folders in ProgramData, so check that
+  Administrators own `OpenAI`, `Codex` and the file, and that Users can only read `Codex` and the
+  file. The floor is UNVERIFIED until an admin installs it: then
   `codex exec -s danger-full-access` and `codex exec --approve-for-me` should be refused.
   `allowed_approvals_reviewers` is in Codex 0.166.0's requirements keys, but no Codex doc
   describes it yet.

@@ -19,7 +19,7 @@ import { hasUnsafePathChar, lookupSteps, realProbes } from "../guard/protection.
 import type { Group } from "../guard/tiers.js";
 import { clientPaths, codexHome } from "./clients.js";
 import { pathLib, requireServer, serverContext, stateRoot } from "./context.js";
-import { policyFileCommands, SID } from "./init.js";
+import { policyFileCommands, SID, windowsCheckedWrite, windowsFolderCommands } from "./init.js";
 import { CliError, errnoCode, EXIT, rootWarning, type CliIo, type Outcome } from "./io.js";
 import { checkManifest, locateManifest, readManifest } from "./manifest.js";
 import {
@@ -98,16 +98,24 @@ const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "obj
  * own it, Users read). On Windows, /reset drops every explicit entry the new file was created with,
  * such as full control for the admin who wrote it when its folder passes nothing down: /grant:r only
  * replaces the entries it names. The owner is set first, so the reset file stays writable for icacls.
+ *
+ * `top` is the client's own machine-wide folder (C:\Program Files\ClaudeCode, C:\ProgramData\Cursor).
+ * On Windows it and every folder below it down to the file are taken over before the file is written:
+ * anyone may create a folder in ProgramData, and whoever owns the folder can delete the file and put
+ * their own in its place. `top` itself stops inheriting, so Users only read what is in it.
  */
-export function adminFileCommands(platform: NodeJS.Platform, file: string, text: string): string[] {
+export function adminFileCommands(platform: NodeJS.Platform, file: string, text: string, top?: string): string[] {
   if (platform === "win32") {
+    const dir = win32.dirname(file);
+    const chain = top === undefined ? [] : folderChain(top, dir);
     return [
-      `New-Item -ItemType Directory -Force -Path ${psQuote(win32.dirname(file))} | Out-Null`,
+      `New-Item -ItemType Directory -Force -Path ${psQuote(dir)} | Out-Null`,
+      ...windowsFolderCommands(chain, (d) => d === chain[0]),
       `$content = @'\n${text}'@`,
-      `[System.IO.File]::WriteAllText(${psQuote(file)}, $content)`,
-      `icacls ${psQuote(file)} /setowner '${SID.administrators}' /C`,
-      `icacls ${psQuote(file)} /reset /C`,
-      `icacls ${psQuote(file)} /inheritance:r /grant:r '${SID.system}:F' '${SID.administrators}:F' '${SID.users}:RX'`,
+      windowsCheckedWrite(file, chain, "$content"),
+      `icacls ${psQuote(file)} /setowner '${SID.administrators}' /L /C`,
+      `icacls ${psQuote(file)} /reset /L /C`,
+      `icacls ${psQuote(file)} /inheritance:r /grant:r '${SID.system}:F' '${SID.administrators}:F' '${SID.users}:RX' /L /C`,
     ];
   }
   return [
@@ -116,6 +124,16 @@ export function adminFileCommands(platform: NodeJS.Platform, file: string, text:
     `sudo chown 0:0 ${shQuote(file)}`,
     `sudo chmod 0644 ${shQuote(file)}`,
   ];
+}
+
+/** The folders from `top` down to `dir`, top first. */
+function folderChain(top: string, dir: string): string[] {
+  const chain: string[] = [];
+  for (let d = dir; ; d = win32.dirname(d)) {
+    chain.unshift(d);
+    if (d.toLowerCase() === top.toLowerCase()) return chain;
+    if (win32.dirname(d) === d) throw new Error(`${dir} is not inside ${top}.`);
+  }
 }
 
 function underHome(io: CliIo, path: string): boolean {
@@ -524,7 +542,7 @@ function buildClaude(io: CliIo, args: HarnessArgs, server: string, names: string
   const dropIn = lib.join(dir, `50-mcp-guard-${server}.json`);
   const text = json(settings);
   built.files.unshift({ path: dropIn, scope: "admin", install: "write", format: "json", purpose: `permission rules for ${names.join(", ")}`, content: text });
-  built.commands.unshift(...adminFileCommands(io.platform, dropIn, text));
+  built.commands.unshift(...adminFileCommands(io.platform, dropIn, text, clientPaths(io).claudeManaged));
   if (mcpCommands.length) {
     const allow = mcpAllowNotes(mcpCommands);
     built.notes.push(...allow.notes);
@@ -534,7 +552,7 @@ function buildClaude(io: CliIo, args: HarnessArgs, server: string, names: string
     const profile = sandboxProfile(io, args);
     const path = lib.join(dir, "45-mcp-guard-sandbox.json");
     built.files.push({ path, scope: "admin", install: "write", format: "json", purpose: "the operator sandbox profile (every session on this machine)", content: profile.content });
-    built.commands.push(...adminFileCommands(io.platform, path, profile.content));
+    built.commands.push(...adminFileCommands(io.platform, path, profile.content, clientPaths(io).claudeManaged));
     built.notes.push(...profile.notes);
   }
   built.notes.unshift(
@@ -596,6 +614,11 @@ function buildCodex(io: CliIo, server: string, names: string[], decisions: ToolD
     notes: [
       "enabled_tools lists every tool this run allows or asks for, so a tool the server adds later stays hidden until you run harness again. disabled_tools removes the denied groups' tools.",
       "config.toml is yours, so the agent's user can change it too. The admin's part is requirements.toml: it rules out the full-access sandbox, --yolo and the automatic reviewer for everyone.",
+      ...(io.platform === "win32"
+        ? [
+            `Any user may create folders in ProgramData. Before merging, check with icacls that Administrators own ${lib.dirname(clientPaths(io).codexAdmin)}, ${clientPaths(io).codexAdmin} and requirements.toml, and that Users can only read the last two. Otherwise the agent's user can change the floor, or add a file Codex reads from that folder.`,
+          ]
+        : []),
       "Tested with Codex 0.166.0 (codex exec): a \"prompt\" tool is refused when no one can answer, and runs without asking in the full-access sandbox or with --approve-for-me. disabled_tools held in every mode: the tools were gone, and calls by name failed.",
       "The floor is UNVERIFIED until an admin installs it: then codex exec -s danger-full-access and --approve-for-me should be refused. allowed_approvals_reviewers is in the 0.166.0 binary's requirements keys, but no Codex doc describes it yet.",
       "A [mcp_servers] table in requirements.toml is an allowlist: once it has one, Codex runs only the servers listed there. mcp-guard does not write it.",
@@ -628,14 +651,19 @@ function buildCursor(io: CliIo, args: HarnessArgs, server: string, names: string
     built.files.push({ path: target, scope: "admin", install: "merge", format: "json", purpose: `add this entry to hooks.beforeMCPExecution (mcp-guard cannot read the file: ${unreadable})`, content: json(entry) });
   } else {
     const merged = mergeCursorHooks(existing, entry, target);
+    // Windows: any user may create ProgramData\Cursor and a hooks.json in it that already has the
+    // entry, so a file that has it is written again, after its folder is taken over.
+    const write = merged.status !== "present" || io.platform === "win32";
     const purpose =
       merged.status === "new"
         ? "the hook that blocks denied tools"
         : merged.status === "present"
-          ? "already has the mcp-guard hook"
+          ? write
+            ? "already has the mcp-guard hook; written again, so that only an admin can change it or its folder"
+            : "already has the mcp-guard hook"
           : `the file as it is now, with the mcp-guard hook ${merged.status === "added" ? "added" : "updated"}`;
-    built.files.push({ path: target, scope: "admin", install: merged.status === "present" ? "none" : "write", format: "json", purpose, content: merged.text });
-    if (merged.status !== "present") built.commands.push(...adminFileCommands(io.platform, target, merged.text));
+    built.files.push({ path: target, scope: "admin", install: write ? "write" : "none", format: "json", purpose, content: merged.text });
+    if (write) built.commands.push(...adminFileCommands(io.platform, target, merged.text, lib.dirname(target)));
   }
 
   const reads = names.flatMap((n) => decisions.filter((d) => d.rule === "allow").map((d) => `${n}:${d.tool}`));

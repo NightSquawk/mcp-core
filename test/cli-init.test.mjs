@@ -86,22 +86,42 @@ test("init as root warns that mcp-guard never needs root", async (t) => {
   assert.doesNotMatch(r.text, /sudo mcp-guard/);
 });
 
-test("standard paths on Windows: PowerShell here-string and icacls, owners set before each reset", async () => {
+test("standard paths on Windows: each folder is taken over, top first, before the file is written; owners set before each reset", async () => {
   const r = await cli(["init", SERVER, "--json"], { env: { ProgramData: "C:\\ProgramData" }, platform: "win32", home: "C:\\Users\\tester" });
   if (r.code === 1) return; // a real C:\ProgramData policy exists on this Windows runner
   assert.equal(r.code, 3);
   assert.equal(r.json.admin.shell, "powershell");
-  const root = "C:\\ProgramData\\NightSquawk\\mcp";
+  const parent = "C:\\ProgramData\\NightSquawk";
+  const root = `${parent}\\mcp`;
+  const dir = `${root}\\${SERVER}`;
+  const file = `${dir}\\policy.json`;
   assert.deepEqual(r.json.admin.commands, windowsPolicyCommands(root, SERVER, starterPolicyText(SERVER)));
   const cmds = r.json.admin.commands;
-  const at = (s) => cmds.findIndex((c) => c === s);
-  const setParent = at("icacls 'C:\\ProgramData\\NightSquawk' /setowner '*S-1-5-32-544' /C");
-  const resetParent = at("icacls 'C:\\ProgramData\\NightSquawk' /reset /C");
-  const setRoot = at(`icacls '${root}' /setowner '*S-1-5-32-544' /T /C`);
-  const resetRoot = at(`icacls '${root}' /reset /C`);
-  assert.ok(setParent >= 0 && setParent < resetParent && resetParent < setRoot && setRoot < resetRoot, "owner before each /reset");
-  assert.ok(cmds.includes(`icacls '${root}' /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX'`));
-  assert.ok(cmds[1].startsWith("$policy = @'\n") && cmds[1].endsWith("\n'@"), "here-string terminator at the start of its line");
+  const at = (s) => {
+    const i = cmds.indexOf(s);
+    assert.ok(i >= 0, s);
+    return i;
+  };
+  const write = cmds.findIndex((c) => c.includes("[System.IO.File]::WriteAllText("));
+  let last = -1;
+  for (const p of [parent, root, dir, file]) {
+    const set = at(`icacls '${p}' /setowner '*S-1-5-32-544' /L /C`);
+    const reset = at(`icacls '${p}' /reset /L /C`);
+    assert.ok(last < set && set < reset, `top first, and the owner before /reset: ${p}`);
+    assert.ok(p === file ? set > write : reset < write, `${p} is taken over ${p === file ? "after" : "before"} the write`);
+    assert.ok(cmds[write].includes(`'${p}'`), `the write refuses a link at ${p}`);
+    last = reset;
+  }
+  assert.deepEqual(
+    cmds.filter((c) => c.includes("/inheritance:r")),
+    [`icacls '${root}' /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /L /C`],
+    "only the policy root stops inheriting; NightSquawk keeps ProgramData's permissions"
+  );
+  assert.ok(!cmds.some((c) => /\/T\b/.test(c)), "never recursive: /T can follow a junction planted inside");
+  const policy = cmds.findIndex((c) => c.startsWith("$policy = @'\n"));
+  assert.ok(policy > 0 && policy < write && cmds[policy].endsWith("\n'@"), "here-string terminator at the start of its line");
+  assert.match(cmds[write], /ReparsePoint\) \{ throw "\$p is a junction or symbolic link, so nothing was written\./);
+  assert.equal(cmds.at(-1), `icacls '${file}'`, "the result is shown last");
   assert.deepEqual(r.json.warnings, []);
 
   const text = await cli(["init", SERVER], { env: { ProgramData: "C:\\ProgramData" }, platform: "win32" });
@@ -115,7 +135,7 @@ test("Windows: a moved ProgramData is warned about and every quote character is 
   if (r.code === 1) return;
   assert.equal(r.code, 3);
   assert.ok(r.json.warnings.some((w) => w.includes("D:\\Pro\u2019gram Data") && w.includes("C:\\ProgramData")));
-  assert.ok(r.json.admin.commands.includes("icacls 'D:\\Pro\u2019\u2019gram Data\\NightSquawk' /reset /C"), "U+2019 is doubled like an ASCII quote");
+  assert.ok(r.json.admin.commands.includes("icacls 'D:\\Pro\u2019\u2019gram Data\\NightSquawk' /reset /L /C"), "U+2019 is doubled like an ASCII quote");
 });
 
 test("the POSIX commands quote paths with single quotes", () => {

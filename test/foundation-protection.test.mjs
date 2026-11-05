@@ -318,13 +318,13 @@ test("parseRegDwords: REG_DWORD values only, CRLF output", () => {
 const WIN_POLICY = "C:\\ProgramData\\NightSquawk\\mcp\\column\\policy.json";
 const winEnv = { ProgramData: "C:\\ProgramData" };
 
-test("windowsPart1: checks the file and each folder up to ProgramData\\NightSquawk, never ProgramData itself", () => {
+test("windowsPart1: probes each folder up to the policy root, ProgramData\\NightSquawk\\mcp, never NightSquawk or ProgramData", () => {
   const probes = fakeProbes({ platform: "win32", env: winEnv, files: { [WIN_POLICY]: fileStat() } });
   assert.deepEqual(P.windowsPart1(WIN_POLICY, probes), { ok: true, reasons: [] });
-  assert.deepEqual(probes.calls.canCreateIn, ["C:\\ProgramData\\NightSquawk\\mcp\\column", "C:\\ProgramData\\NightSquawk\\mcp", "C:\\ProgramData\\NightSquawk"]);
+  assert.deepEqual(probes.calls.canCreateIn, ["C:\\ProgramData\\NightSquawk\\mcp\\column", "C:\\ProgramData\\NightSquawk\\mcp"]);
   const lower = fakeProbes({ platform: "win32", env: { ProgramData: "c:\\programdata" }, files: { [WIN_POLICY]: fileStat() } });
   P.windowsPart1(WIN_POLICY, lower);
-  assert.equal(lower.calls.canCreateIn.length, 3, "the stop folder is compared case-insensitively");
+  assert.equal(lower.calls.canCreateIn.length, 2, "the stop folder is compared case-insensitively");
 });
 
 test("windowsPart1: a writable file or a folder the user can create in is a reason", () => {
@@ -332,11 +332,14 @@ test("windowsPart1: a writable file or a folder the user can create in is a reas
   const w = P.windowsPart1(WIN_POLICY, fakeProbes({ platform: "win32", env: winEnv, files, writable: [WIN_POLICY] }));
   assert.equal(w.ok, false);
   assert.ok(w.reasons.some((r) => /can open .*policy\.json for writing/.test(r)));
-  for (const dir of ["C:\\ProgramData\\NightSquawk\\mcp\\column", "C:\\ProgramData\\NightSquawk\\mcp", "C:\\ProgramData\\NightSquawk"]) {
+  for (const dir of ["C:\\ProgramData\\NightSquawk\\mcp\\column", "C:\\ProgramData\\NightSquawk\\mcp"]) {
     const c = P.windowsPart1(WIN_POLICY, fakeProbes({ platform: "win32", env: winEnv, files, creatable: [dir] }));
     assert.equal(c.ok, false, dir);
     assert.ok(c.reasons.includes(`This user can create files in ${dir}.`), JSON.stringify(c.reasons));
   }
+  // init leaves NightSquawk with ProgramData's permissions, where users may create folders. Only its owner counts.
+  const above = P.windowsPart1(WIN_POLICY, fakeProbes({ platform: "win32", env: winEnv, files, creatable: ["C:\\ProgramData\\NightSquawk", "C:\\ProgramData"] }));
+  assert.deepEqual(above, { ok: true, reasons: [] });
   assert.equal(P.windowsPart1(WIN_POLICY, fakeProbes({ platform: "win32", env: winEnv })).ok, false, "missing file");
 });
 

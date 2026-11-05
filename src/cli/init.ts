@@ -23,6 +23,43 @@ export interface InitArgs {
 /** SIDs used in the Windows commands. */
 export const SID = Object.freeze({ system: "*S-1-5-18", administrators: "*S-1-5-32-544", users: "*S-1-5-32-545" });
 
+/**
+ * Windows: take over a chain of folders, top first. Administrators own each one and the entries
+ * anyone else added are dropped (/reset; the owner is set first, so an inherited CREATOR OWNER entry
+ * resolves to Administrators). A folder `protect` picks stops inheriting and grants SYSTEM and
+ * Administrators full control and Users read, handed down to what is inside; the others take what
+ * their parent hands down. One folder at a time, never /T: a recursive change can follow a junction
+ * someone planted inside. /L: a link is changed itself, never what it points to.
+ */
+export function windowsFolderCommands(chain: readonly string[], protect: (dir: string) => boolean): string[] {
+  return chain.flatMap((dir) => {
+    const d = psQuote(dir);
+    return [
+      `icacls ${d} /setowner '${SID.administrators}' /L /C`,
+      `icacls ${d} /reset /L /C`,
+      ...(protect(dir) ? [`icacls ${d} /inheritance:r /grant:r '${SID.system}:(OI)(CI)F' '${SID.administrators}:(OI)(CI)F' '${SID.users}:(OI)(CI)RX' /L /C`] : []),
+    ];
+  });
+}
+
+/**
+ * Windows: the PowerShell that writes the text in `variable` to `file`. It refuses when a folder in
+ * `chain` or the file itself is a junction or symbolic link, since the write would land wherever the
+ * link leads. A file already there is deleted first, not overwritten: whoever made it may still hold
+ * it open, and an open handle keeps its access through an overwrite and an ACL change. It is one line,
+ * so a refusal or a failed delete stops the write even when the commands are pasted one line at a
+ * time.
+ */
+export function windowsCheckedWrite(file: string, chain: readonly string[], variable: string): string {
+  const paths = [...chain, file].map(psQuote).join(", ");
+  return (
+    `foreach ($p in @(${paths})) { if ((Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue).Attributes -band [IO.FileAttributes]::ReparsePoint) ` +
+    `{ throw "$p is a junction or symbolic link, so nothing was written. Remove the link (not what it points to) and run these commands again." } }; ` +
+    `if (Test-Path -LiteralPath ${psQuote(file)} -PathType Leaf) { Remove-Item -LiteralPath ${psQuote(file)} -Force -ErrorAction Stop }; ` +
+    `[System.IO.File]::WriteAllText(${psQuote(file)}, ${variable})`
+  );
+}
+
 export function starterPolicy(server: string): Record<string, unknown> {
   return { version: 1, server, groups: { read: true, change: false, critical: false, spend: false }, environment: { allow_live: false } };
 }
@@ -48,27 +85,26 @@ export function posixPolicyCommands(root: string, server: string, text: string, 
 }
 
 /**
- * Administrators own every folder from NightSquawk down (the protection check
- * reads each owner), the policy root stops inheriting from ProgramData (where
- * Users may create folders), and everything below it inherits only SYSTEM and
- * Administrators full control plus Users read. Owners are set before each
- * /reset, so inherited CREATOR OWNER entries resolve to Administrators.
+ * Administrators own NightSquawk, the policy root, the server's folder and the file (the protection
+ * check reads each owner). The policy root stops inheriting from ProgramData (where Users may create
+ * folders), and the folder and file below it inherit only SYSTEM and Administrators full control
+ * plus Users read. NightSquawk keeps what ProgramData hands down, so other software can keep its own
+ * folders there. The folders are taken over before the file is written, so nobody else can change
+ * them in between.
  */
 export function windowsPolicyCommands(root: string, server: string, text: string, fileName = "policy.json"): string[] {
   const parent = win32.dirname(root);
   const dir = win32.join(root, server);
   const file = win32.join(dir, fileName);
+  const chain = [parent, root, dir];
   return [
     `New-Item -ItemType Directory -Force -Path ${psQuote(dir)} | Out-Null`,
+    ...windowsFolderCommands(chain, (d) => d === root),
     `$policy = @'\n${text}'@`,
-    `[System.IO.File]::WriteAllText(${psQuote(file)}, $policy)`,
-    `icacls ${psQuote(parent)} /setowner '${SID.administrators}' /C`,
-    `icacls ${psQuote(parent)} /reset /C`,
-    `icacls ${psQuote(root)} /setowner '${SID.administrators}' /T /C`,
-    `icacls ${psQuote(root)} /reset /C`,
-    `icacls ${psQuote(root)} /inheritance:r /grant:r '${SID.system}:(OI)(CI)F' '${SID.administrators}:(OI)(CI)F' '${SID.users}:(OI)(CI)RX'`,
-    `icacls ${psQuote(win32.join(root, "*"))} /reset /T /C`,
-    `icacls ${psQuote(root)} /T`,
+    windowsCheckedWrite(file, chain, "$policy"),
+    `icacls ${psQuote(file)} /setowner '${SID.administrators}' /L /C`,
+    `icacls ${psQuote(file)} /reset /L /C`,
+    `icacls ${psQuote(file)}`,
   ];
 }
 
