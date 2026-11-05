@@ -9,7 +9,7 @@
  * `reg query`; none of them changes anything.
  */
 import { spawnSync } from "node:child_process";
-import { closeSync, lstatSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, lstatSync, openSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { posix, win32 } from "node:path";
 import { randomBytes } from "node:crypto";
 import { DEFAULT_PROGRAM_DATA, programDataDir } from "./paths.js";
@@ -44,7 +44,8 @@ export interface WindowsOwnerInfo {
 export interface ProtectionProbes {
   platform: NodeJS.Platform;
   lstat(path: string): StatInfo | null;
-  realpath(path: string): string;
+  /** A symlink's target as stored, or null when it cannot be read. */
+  readlink(path: string): string | null;
   run(cmd: string, args: readonly string[]): RunResult;
   getuid(): number | undefined;
   /** Windows: can the current user open the file for writing? */
@@ -194,7 +195,13 @@ export function realProbes(): ProtectionProbes {
         return null;
       }
     },
-    realpath: (p) => realpathSync(p),
+    readlink(path) {
+      try {
+        return readlinkSync(path);
+      } catch {
+        return null;
+      }
+    },
     run(cmd, args) {
       const r = spawnSync(cmd, [...args], {
         encoding: "utf8",
@@ -259,7 +266,60 @@ export function realProbes(): ProtectionProbes {
 
 // ---------------------------------------------------------------- Linux / macOS
 
-/** Part 1 on POSIX: the file and every directory up to / are root-owned and not group/other-writable. */
+/** One entry a path lookup passes through: "/", a folder, a symlink, or what the path names. */
+export interface LookupStep {
+  path: string;
+  stat: StatInfo;
+}
+
+/** The most symlinks one lookup follows, as on Linux. */
+export const MAX_SYMLINKS = 40;
+
+/**
+ * Resolve an absolute POSIX path one name at a time, the way the kernel does, and list every entry
+ * the lookup passes through: "/", each folder, each symlink however many links deep, and last what
+ * the path names. Whoever can change one of them can point the path somewhere else. `error` (a
+ * clause such as "/x cannot be read") says where the lookup stopped; the steps before it are kept.
+ */
+export function lookupSteps(path: string, probes: Pick<ProtectionProbes, "lstat" | "readlink">): { steps: LookupStep[]; error?: string } {
+  const steps: LookupStep[] = [];
+  const seen = new Set<string>();
+  const step = (p: string): StatInfo | null => {
+    const stat = probes.lstat(p);
+    if (stat && !seen.has(p)) {
+      seen.add(p);
+      steps.push({ path: p, stat });
+    }
+    return stat;
+  };
+  if (!path.startsWith("/")) return { steps, error: `${path} is not an absolute path` };
+  if (!step("/")) return { steps, error: "/ cannot be read" };
+  const names = path.split("/").filter((n) => n && n !== ".");
+  let dir = "/";
+  let links = 0;
+  while (names.length) {
+    const name = names.shift() as string;
+    if (name === "..") {
+      dir = posix.dirname(dir);
+      continue;
+    }
+    const next = posix.join(dir, name);
+    const stat = step(next);
+    if (!stat) return { steps, error: `${next} cannot be read` };
+    if (!stat.isSymbolicLink) {
+      dir = next;
+      continue;
+    }
+    if (++links > MAX_SYMLINKS) return { steps, error: `${path} cannot be resolved: more than ${MAX_SYMLINKS} symlinks` };
+    const target = probes.readlink(next);
+    if (target === null) return { steps, error: `the symlink ${next} cannot be read` };
+    if (target.startsWith("/")) dir = "/";
+    names.unshift(...target.split("/").filter((n) => n && n !== "."));
+  }
+  return { steps };
+}
+
+/** Part 1 on POSIX: the file and every folder its lookup passes through are root-owned and not group/other-writable. */
 export function posixPart1(policyPath: string, probes: ProtectionProbes): ProtectionPart {
   const reasons: string[] = [];
   const file = probes.lstat(policyPath);
@@ -269,24 +329,16 @@ export function posixPart1(policyPath: string, probes: ProtectionProbes): Protec
   if (file.uid !== 0) reasons.push(`${policyPath} is owned by uid ${file.uid}, not root.`);
   if (file.mode & 0o022) reasons.push(`${policyPath} is writable by its group or others (mode ${(file.mode & 0o777).toString(8)}).`);
 
-  let dir: string;
-  try {
-    dir = probes.realpath(posix.dirname(policyPath));
-  } catch {
-    return { ok: false, reasons: [...reasons, `Cannot resolve ${posix.dirname(policyPath)}.`] };
+  // Every folder the lookup of the policy's folder passes through, however many symlinks deep. A
+  // symlink itself cannot be changed, only replaced by whoever can write the folder holding it, and
+  // that folder is on the lookup too. A sticky folder others can write fails here anyway.
+  const lookup = lookupSteps(posix.dirname(policyPath), probes);
+  for (const { path, stat } of [...lookup.steps].reverse()) {
+    if (stat.isSymbolicLink) continue;
+    if (stat.uid !== 0) reasons.push(`${path} is owned by uid ${stat.uid}, not root.`);
+    if (stat.mode & 0o022) reasons.push(`${path} is writable by its group or others (mode ${(stat.mode & 0o777).toString(8)}).`);
   }
-  for (;;) {
-    const s = probes.lstat(dir);
-    if (!s) {
-      reasons.push(`Cannot stat ${dir}.`);
-      break;
-    }
-    if (s.uid !== 0) reasons.push(`${dir} is owned by uid ${s.uid}, not root.`);
-    if (s.mode & 0o022) reasons.push(`${dir} is writable by its group or others (mode ${(s.mode & 0o777).toString(8)}).`);
-    const parent = posix.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
+  if (lookup.error) reasons.push(`${lookup.error[0].toUpperCase()}${lookup.error.slice(1)}.`);
   const uid = probes.getuid();
   if (uid === 0) reasons.push("This process runs as root, so it can change the policy.");
   if (probes.platform === "linux" && probes.readText) {

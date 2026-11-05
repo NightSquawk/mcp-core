@@ -215,7 +215,7 @@ function probes({ platform = "linux", files = {}, runs = {}, uid = 1000, env = {
     platform,
     env,
     lstat: (p) => files[p] ?? null,
-    realpath: (p) => p,
+    readlink: () => null,
     run(cmd, args) {
       const key = [cmd, ...args].join(" ");
       calls.run.push(key);

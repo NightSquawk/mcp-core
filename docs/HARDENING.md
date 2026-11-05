@@ -65,9 +65,9 @@ Folders under `C:\Program Files` let Users read and run, not write. A folder on 
 or a new folder under `C:\ProgramData` often lets every user write, so don't use those.
 
 **Check.** `mcp-guard harness ... --hook` warns when the hook would run Node or mcp-guard from a
-file someone other than root could change. On Linux and macOS it walks each file and every folder
-above it, both as written and with links resolved. On Windows it only flags paths under your home
-folder. Run harness with the admin-owned Node and script, or pass `--hook-script`:
+file someone other than root could change. On Linux and macOS it looks each file up one name at a
+time and checks the file and every folder and link on the way, however many links deep. On Windows
+it only flags paths under your home folder. Run harness with the admin-owned Node and script, or pass `--hook-script`:
 
 ```sh
 /usr/bin/node "$(npm root -g)/@nightsquawktech/mcp-core/dist/cli/index.js" harness <server> --claude --hook
@@ -142,8 +142,10 @@ off. The one exception is a server reporting sandbox mode, such as a provider te
 
 **Part 1: the agent's OS user cannot change the policy.**
 - Linux, macOS: the file is a regular file (not a link), owned by root, with no group or other
-  write bit, and so is every folder up to `/`. Inside a user namespace (rootless containers,
-  `unshare -Ur`) owners can be forged, so it fails there.
+  write bit. So is every folder the path passes through, looked up one name at a time the way the
+  system does it: each folder above the file and, where the path goes through symlinks, the folder
+  holding each link and every folder it leads to, however many links deep. Inside a user namespace
+  (rootless containers, `unshare -Ur`) owners can be forged, so it fails there.
 - Windows: opening the file for writing fails, and creating a probe file fails in each folder from
   the policy's folder up to `%ProgramData%\NightSquawk`. Every one of those folders is owned by
   Administrators, SYSTEM or TrustedInstaller.

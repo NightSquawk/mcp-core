@@ -29,7 +29,7 @@ export function test(name, options, fn) {
  */
 const ROOT_OWNED = Object.freeze({
   lstat: () => ({ isFile: true, isDirectory: false, isSymbolicLink: false, uid: 0, mode: 0o100644 }),
-  realpath: (p) => p,
+  readlink: () => null,
 });
 
 export function fakeIo(opts = {}) {

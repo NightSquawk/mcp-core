@@ -33,14 +33,15 @@ export interface CliIo {
   protect?: (policyPath: string, override: boolean) => ProtectionReport;
   /** Moves the machine-wide client config folders (tests). Real runs leave it unset. */
   clientPaths?: Partial<ClientPaths>;
-  /** lstat and realpath for harness's check of the files a hook runs (tests inject fakes; real runs use the file system). */
+  /** lstat and readlink for harness's check of the files a hook runs (tests inject fakes; real runs use the file system). */
   pathProbes?: PathProbes;
 }
 
 export interface PathProbes {
   /** null when the path does not exist or cannot be read. */
   lstat(path: string): StatInfo | null;
-  realpath(path: string): string;
+  /** A symlink's target as stored, or null when it cannot be read. */
+  readlink(path: string): string | null;
 }
 
 /** Machine-wide client config, outside any home folder. clients.ts has the real locations. */

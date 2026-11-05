@@ -11,14 +11,15 @@ const P = await import(dist("guard/protection.js"));
 
 const dirStat = (uid = 0, mode = 0o40755) => ({ isFile: false, isDirectory: true, isSymbolicLink: false, uid, mode });
 const fileStat = (uid = 0, mode = 0o100644) => ({ isFile: true, isDirectory: false, isSymbolicLink: false, uid, mode });
-const linkStat = () => ({ isFile: false, isDirectory: false, isSymbolicLink: true, uid: 0, mode: 0o120777 });
+const linkStat = (uid = 0) => ({ isFile: false, isDirectory: false, isSymbolicLink: true, uid, mode: 0o120777 });
 
 /**
  * Recorded OS answers. `runs` maps "cmd args..." (or just "cmd") to a result; unknown programs are ENOENT.
+ * `links` maps a symlink's path to its target as stored; its `files` entry must be a linkStat().
  * `texts` (path -> text) and `owners` (an answer, or a function of the paths) add the optional readText and
  * windowsOwners probes; left out, the probe is missing, as in a hand-made double.
  */
-function fakeProbes({ platform = "linux", files = {}, realpaths = {}, runs = {}, uid = 1000, env = {}, writable = [], creatable = [], texts, owners } = {}) {
+function fakeProbes({ platform = "linux", files = {}, links = {}, runs = {}, uid = 1000, env = {}, writable = [], creatable = [], texts, owners } = {}) {
   const calls = { run: [], canCreateIn: [], readText: [], windowsOwners: [] };
   const optional = {};
   if (texts !== undefined) {
@@ -39,11 +40,7 @@ function fakeProbes({ platform = "linux", files = {}, realpaths = {}, runs = {},
     platform,
     env,
     lstat: (p) => files[p] ?? null,
-    realpath(p) {
-      const r = realpaths[p];
-      if (r instanceof Error) throw r;
-      return r ?? p;
-    },
+    readlink: (p) => (Object.hasOwn(links, p) ? links[p] : null),
     run(cmd, args) {
       const key = [cmd, ...args].join(" ");
       calls.run.push(key);
@@ -89,7 +86,7 @@ test("posixPart1: each way the agent's user could change the policy is a reason"
     [{ "/etc/nightsquawk-mcp": dirStat(0, 0o40775) }, /\/etc\/nightsquawk-mcp is writable by its group or others/],
     [{ "/etc": dirStat(0, 0o41777) }, /\/etc is writable/],
     [{ "/": dirStat(1000) }, /\/ is owned by uid 1000/],
-    [{ "/etc/nightsquawk-mcp": undefined }, /Cannot stat \/etc\/nightsquawk-mcp/],
+    [{ "/etc/nightsquawk-mcp": undefined }, /^\/etc\/nightsquawk-mcp cannot be read\.$/],
   ];
   for (const [overrides, reason] of cases) {
     const files = rootTree();
@@ -103,14 +100,72 @@ test("posixPart1: each way the agent's user could change the policy is a reason"
   }
 });
 
-test("posixPart1: folders are checked after resolving symlinks", () => {
-  const files = { ...rootTree(), "/home/kim/fake": dirStat(1000), "/home/kim": dirStat(1000), "/home": dirStat() };
-  const part = P.posixPart1(POLICY, fakeProbes({ files, realpaths: { "/etc/nightsquawk-mcp/column": "/home/kim/fake" } }));
+test("posixPart1: the folders a symlink leads to are checked", () => {
+  const files = { ...rootTree(), "/etc/nightsquawk-mcp/column": linkStat(), "/home": dirStat(), "/home/kim": dirStat(1000), "/home/kim/fake": dirStat(1000) };
+  const part = P.posixPart1(POLICY, fakeProbes({ files, links: { "/etc/nightsquawk-mcp/column": "/home/kim/fake" } }));
   assert.equal(part.ok, false);
-  assert.ok(part.reasons.some((r) => r.startsWith("/home/kim/fake is owned by uid 1000")));
-  const broken = P.posixPart1(POLICY, fakeProbes({ files: rootTree(), realpaths: { "/etc/nightsquawk-mcp/column": new Error("ELOOP") } }));
-  assert.equal(broken.ok, false);
-  assert.ok(broken.reasons.some((r) => /Cannot resolve/.test(r)));
+  assert.ok(part.reasons.includes("/home/kim/fake is owned by uid 1000, not root."), JSON.stringify(part.reasons));
+  assert.ok(part.reasons.includes("/home/kim is owned by uid 1000, not root."), JSON.stringify(part.reasons));
+});
+
+test("posixPart1: the folder holding a symlink is checked, even when the link leads to root's folders", () => {
+  // Whoever can write /etc/nightsquawk-mcp can point column at another policy.
+  const files = {
+    ...rootTree(),
+    "/etc/nightsquawk-mcp": dirStat(1000),
+    "/etc/nightsquawk-mcp/column": linkStat(),
+    "/opt": dirStat(),
+    "/opt/real": dirStat(),
+    "/opt/real/column": dirStat(),
+  };
+  for (const target of ["/opt/real/column", "../../opt/real/column"]) {
+    const part = P.posixPart1(POLICY, fakeProbes({ files, links: { "/etc/nightsquawk-mcp/column": target } }));
+    assert.deepEqual(part.reasons, ["/etc/nightsquawk-mcp is owned by uid 1000, not root."], target);
+  }
+});
+
+test("posixPart1: every hop of a chain of symlinks is checked, however deep", () => {
+  // column -> /home/kim/link -> /opt/real/column: kim can point the middle link anywhere.
+  const files = {
+    ...rootTree(),
+    "/etc/nightsquawk-mcp/column": linkStat(),
+    "/home": dirStat(),
+    "/home/kim": dirStat(1000),
+    "/home/kim/link": linkStat(1000),
+    "/opt": dirStat(),
+    "/opt/real": dirStat(),
+    "/opt/real/column": dirStat(),
+  };
+  const links = { "/etc/nightsquawk-mcp/column": "/home/kim/link", "/home/kim/link": "/opt/real/column" };
+  assert.deepEqual(P.posixPart1(POLICY, fakeProbes({ files, links })).reasons, ["/home/kim is owned by uid 1000, not root."]);
+  const steps = P.lookupSteps("/etc/nightsquawk-mcp/column", fakeProbes({ files, links })).steps.map((s) => s.path);
+  assert.deepEqual(steps, ["/", "/etc", "/etc/nightsquawk-mcp", "/etc/nightsquawk-mcp/column", "/home", "/home/kim", "/home/kim/link", "/opt", "/opt/real", "/opt/real/column"]);
+});
+
+test("posixPart1: root's symlinks in root's folders pass (macOS /etc -> private/etc)", () => {
+  const files = {
+    "/": dirStat(),
+    "/etc": linkStat(),
+    "/private": dirStat(),
+    "/private/etc": dirStat(),
+    "/private/etc/nightsquawk-mcp": dirStat(),
+    "/private/etc/nightsquawk-mcp/column": dirStat(),
+    [POLICY]: fileStat(),
+  };
+  const mac = fakeProbes({ platform: "darwin", files, links: { "/etc": "private/etc" } });
+  assert.deepEqual(P.posixPart1(POLICY, mac), { ok: true, reasons: [] });
+  const shared = { ...files, "/private/etc/nightsquawk-mcp": dirStat(0, 0o40777) };
+  assert.ok(P.posixPart1(POLICY, fakeProbes({ platform: "darwin", files: shared, links: { "/etc": "private/etc" } })).reasons.includes("/private/etc/nightsquawk-mcp is writable by its group or others (mode 777)."));
+});
+
+test("posixPart1: a symlink loop, an unreadable link or a relative path fails closed", () => {
+  const files = { ...rootTree(), "/etc/nightsquawk-mcp/column": linkStat() };
+  const loop = P.posixPart1(POLICY, fakeProbes({ files, links: { "/etc/nightsquawk-mcp/column": "column" } }));
+  assert.ok(loop.reasons.includes(`/etc/nightsquawk-mcp/column cannot be resolved: more than ${P.MAX_SYMLINKS} symlinks.`), JSON.stringify(loop.reasons));
+  const unreadable = P.posixPart1(POLICY, fakeProbes({ files }));
+  assert.ok(unreadable.reasons.includes("The symlink /etc/nightsquawk-mcp/column cannot be read."), JSON.stringify(unreadable.reasons));
+  assert.deepEqual(P.lookupSteps("etc/x", fakeProbes({ files })), { steps: [], error: "etc/x is not an absolute path" });
+  assert.equal(P.lookupSteps("/etc/../etc/./nightsquawk-mcp", fakeProbes({ files: rootTree() })).steps.at(-1).path, "/etc/nightsquawk-mcp", ". and .. are resolved");
 });
 
 test("posixPart1: a root process can always change the policy", () => {

@@ -15,7 +15,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { posix, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalJson, sha256Hex } from "../guard/canonical.js";
-import { hasUnsafePathChar, realProbes } from "../guard/protection.js";
+import { hasUnsafePathChar, lookupSteps, realProbes } from "../guard/protection.js";
 import type { Group } from "../guard/tiers.js";
 import { clientPaths, codexHome } from "./clients.js";
 import { pathLib, requireServer, serverContext, stateRoot } from "./context.js";
@@ -142,32 +142,28 @@ interface HookProgram {
 
 /**
  * Why someone other than root may be able to change a file the hook runs (POSIX),
- * or null. The file and every folder above it, as written and with links resolved,
- * must be root's and not writable by group or others. A link's own bits mean
- * nothing, so links are judged by their folder and their target; a root-owned
- * sticky folder (/tmp) is fine, since others cannot replace what is in it.
+ * or null. The file and every folder its lookup passes through, however many links
+ * deep, must be root's and not writable by group or others. A link cannot be
+ * changed, only replaced by whoever can write its folder, which is on the lookup
+ * too. A root-owned sticky folder (/tmp) is fine, since others cannot replace what
+ * is in it; but there the owner of a link can, so such a link must be root's.
  */
 export function posixWritableBy(io: CliIo, path: string): string | null {
   const probes = io.pathProbes ?? realProbes();
   if (!probes.lstat(path)) return null; // a missing file has its own warning
-  let real: string;
-  try {
-    real = probes.realpath(path);
-  } catch (e) {
-    return `${path} cannot be resolved (${(e as Error).message})`;
-  }
-  for (const start of real === path ? [path] : [path, real]) {
-    for (let p = start; ; p = posix.dirname(p)) {
-      const s = probes.lstat(p);
-      if (!s) return `${p} cannot be read`;
-      if (!s.isSymbolicLink) {
-        if (s.uid !== 0) return `${p} is owned by uid ${s.uid}, not root`;
-        if (s.mode & 0o022 && !(s.isDirectory && s.mode & 0o1000)) return `${p} is writable by its group or others (mode ${(s.mode & 0o7777).toString(8)})`;
-      }
-      if (posix.dirname(p) === p) break;
+  const { steps, error } = lookupSteps(path, probes);
+  const stats = new Map(steps.map((s) => [s.path, s.stat]));
+  // Closest to the file first, so the warning names the most specific problem.
+  for (const { path: p, stat: s } of [...steps].reverse()) {
+    if (s.isSymbolicLink) {
+      const folder = stats.get(posix.dirname(p));
+      if (s.uid !== 0 && folder && folder.mode & 0o1000 && folder.mode & 0o022) return `${p} is a symlink owned by uid ${s.uid} in a folder others can write`;
+      continue;
     }
+    if (s.uid !== 0) return `${p} is owned by uid ${s.uid}, not root`;
+    if (s.mode & 0o022 && !(s.isDirectory && s.mode & 0o1000)) return `${p} is writable by its group or others (mode ${(s.mode & 0o7777).toString(8)})`;
   }
-  return null;
+  return error ?? null;
 }
 
 function hookProgram(io: CliIo, args: HarnessArgs): HookProgram {

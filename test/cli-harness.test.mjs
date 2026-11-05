@@ -552,22 +552,35 @@ test("warnings (POSIX): a file the hook runs that someone other than root can ch
     "/opt/mine/node": file(1000, 0o100755),
     "/opt/shared": dir(0, 0o40775),
     "/opt/shared/index.js": file(),
+    "/opt/root/hop.js": link,
+    "/opt/mine/hop.js": link,
     "/tmp": dir(0, 0o41777),
     "/tmp/index.js": file(),
+    "/tmp/mine.js": link,
+    "/tmp/root.js": { ...link, uid: 0 },
   };
-  const links = { "/opt/root/link.js": "/opt/root/index.js", "/usr/local/bin/guard.js": "/opt/mine/index.js" };
-  const pathProbes = { lstat: (p) => tree[p] ?? null, realpath: (p) => links[p] ?? p };
+  const links = {
+    "/opt/root/link.js": "/opt/root/index.js",
+    "/usr/local/bin/guard.js": "/opt/mine/index.js",
+    "/opt/root/hop.js": "../mine/hop.js",
+    "/opt/mine/hop.js": "/opt/root/index.js",
+    "/tmp/mine.js": "/opt/root/index.js",
+    "/tmp/root.js": "/opt/root/index.js",
+  };
+  const pathProbes = { lstat: (p) => tree[p] ?? null, readlink: (p) => links[p] ?? null };
   const owned = async (script, execPath = "/usr/bin/node") => {
     const r = await harness(t, ["toy", "--claude", "--hook", "--hook-script", script], { io: { pathProbes, execPath } });
     return r.json.warnings.filter((w) => /may be able to change what the hook does/.test(w));
   };
 
-  for (const ok of ["/opt/root/index.js", "/opt/root/link.js", "/tmp/index.js"]) assert.deepEqual(await owned(ok), [], ok);
+  for (const ok of ["/opt/root/index.js", "/opt/root/link.js", "/tmp/index.js", "/tmp/root.js"]) assert.deepEqual(await owned(ok), [], ok);
   assert.deepEqual(await owned("/opt/mine/index.js"), [
     "The hook runs mcp-guard from /opt/mine/index.js, but /opt/mine/index.js is owned by uid 1000, not root, so the agent's user may be able to change what the hook does. Install Node and mcp-guard where only an admin can write, then pass --hook-script <that dist/cli/index.js>.",
   ]);
   assert.match((await owned("/opt/shared/index.js"))[0], /, but \/opt\/shared is writable by its group or others \(mode 775\), so /);
   assert.match((await owned("/usr/local/bin/guard.js"))[0], /^The hook runs mcp-guard from \/usr\/local\/bin\/guard\.js, but \/opt\/mine\/index\.js is owned by uid 1000/, "a link is judged by its target");
+  assert.match((await owned("/opt/root/hop.js"))[0], /, but \/opt\/mine is owned by uid 1000, not root, so /, "every hop of a chain of links is checked");
+  assert.match((await owned("/tmp/mine.js"))[0], /, but \/tmp\/mine\.js is a symlink owned by uid 1000 in a folder others can write, so /, "in a sticky folder the link's owner can replace it");
   assert.match((await owned("/opt/root/index.js", "/opt/mine/node"))[0], /^The hook runs Node from \/opt\/mine\/node, but \/opt\/mine\/node is owned by uid 1000, not root/);
   assert.deepEqual(await owned("/opt/nowhere/index.js"), [], "a missing script has its own warning, not this one");
 
