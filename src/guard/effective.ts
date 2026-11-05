@@ -164,9 +164,16 @@ export function computeEffective<P extends BasePolicy>(input: EffectiveInput<P>)
         "Protect the policy (hardening SOP): admin-owned file and folders, and an OS user that cannot become admin on its own."
       );
     }
-    // 7. A live key needs allow_live for anything but reads.
-    else if (mode === "live" && group !== "read" && !policy.environment.allow_live) {
-      state = off("live_not_allowed", "This is a live key and the policy does not set environment.allow_live.", `Set environment.allow_live in ${loaded.path} (admin rights).`);
+    // 7. Anything but a sandbox key needs allow_live for anything but reads: a live key, and a key
+    // the server cannot tell (mode none), which may be live.
+    else if (mode !== "sandbox" && group !== "read" && !policy.environment.allow_live) {
+      state = off(
+        "live_not_allowed",
+        mode === "live"
+          ? "This is a live key and the policy does not set environment.allow_live."
+          : "The server cannot tell whether this key is live, and the policy does not set environment.allow_live.",
+        `Set environment.allow_live in ${loaded.path} (admin rights).`
+      );
     }
     // 8. Approvers this version cannot run fail closed. `deny` keeps the group (visible, never runs).
     else if (group !== "read" && !available.has(cfg.approver)) {

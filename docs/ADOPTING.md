@@ -33,7 +33,8 @@ by what the call can do, not by its HTTP method. A non-GET read needs a `read_re
 - `createGuard({ server, version, policySchema, mode, secrets, ... })`:
   - `policySchema` is `basePolicySchema.extend({...})` with the server's own keys;
   - `mode` is `"sandbox"` for test keys and `"live"` for live ones; when the server cannot tell,
-    leave it at the default (`none`);
+    leave it at the default (`none`), which counts as live: every group but `read` then needs
+    `environment.allow_live` in the policy;
   - `secrets` returns the API keys to mask everywhere;
   - `redactKeys` names the server's own credential parameters that the built-in list (`password`,
     `secret`, `token`, `api_key` and similar) misses, so their values are masked in dry runs,

@@ -50,12 +50,14 @@ test("protected and allow_live: every group on in every mode", async (t) => {
   }
 });
 
-test("without allow_live, a live key runs reads only", async (t) => {
+test("without allow_live, a live key and one the server cannot tell run reads only", async (t) => {
   const sb = sandbox(t);
   sb.policy("column", { version: 1, server: "column", groups: { change: true } });
   const r = await cli(["status", "column", "--json"], { env: sb.env, protect: true });
-  assert.deepEqual(groups(r.json.effective.live), { read: "on", change: "live_not_allowed", critical: "group_off", spend: "group_off" });
-  assert.deepEqual(groups(r.json.effective.none), { read: "on", change: "on", critical: "group_off", spend: "group_off" });
+  for (const mode of ["live", "none"]) {
+    assert.deepEqual(groups(r.json.effective[mode]), { read: "on", change: "live_not_allowed", critical: "group_off", spend: "group_off" }, mode);
+  }
+  assert.deepEqual(groups(r.json.effective.sandbox), { read: "on", change: "on", critical: "group_off", spend: "group_off" });
   assert.equal(r.json.policy.allow_live, false);
 });
 

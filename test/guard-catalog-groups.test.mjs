@@ -173,7 +173,8 @@ describe("render functions", () => {
 });
 
 describe("default list and describe", () => {
-  const scenario = { policy: { groups: { read: true, change: true } }, mode: "none" };
+  // A key the server cannot tell counts as live, so the change group needs allow_live.
+  const scenario = { policy: { groups: { read: true, change: true }, environment: { allow_live: true } }, mode: "none" };
 
   test("list filters, pages and explains availability", async (t) => {
     const h = await harness(t, scenario);

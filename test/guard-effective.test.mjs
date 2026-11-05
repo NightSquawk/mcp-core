@@ -98,9 +98,15 @@ describe("computeEffective", () => {
     assert.deepEqual(on(eff(t, { protectedPolicy: false, mode: "sandbox" })), ["read", "change", "critical", "spend"]);
   });
 
-  test("a live key needs allow_live", (t) => {
-    assert.deepEqual(codes(eff(t, { policy: { ...ALL_ON, environment: { allow_live: false } }, mode: "live" })), { read: "on", change: "live_not_allowed", critical: "live_not_allowed", spend: "live_not_allowed" });
-    assert.deepEqual(on(eff(t, { mode: "live" })), ["read", "change", "critical", "spend"]);
+  test("a live key, and one the server cannot tell, needs allow_live; a sandbox key does not", (t) => {
+    const closed = { ...ALL_ON, environment: { allow_live: false } };
+    for (const mode of ["live", "none"]) {
+      assert.deepEqual(codes(eff(t, { policy: closed, mode })), { read: "on", change: "live_not_allowed", critical: "live_not_allowed", spend: "live_not_allowed" }, mode);
+      assert.deepEqual(on(eff(t, { mode })), ["read", "change", "critical", "spend"], mode);
+    }
+    assert.match(eff(t, { policy: closed, mode: "live" }).groups.change.reason, /^This is a live key/);
+    assert.match(eff(t, { policy: closed, mode: "none" }).groups.change.reason, /^The server cannot tell whether this key is live/);
+    assert.deepEqual(on(eff(t, { policy: closed, mode: "sandbox" })), ["read", "change", "critical", "spend"]);
   });
 
   test("approvers this version cannot run fail closed; deny keeps the group visible", (t) => {
