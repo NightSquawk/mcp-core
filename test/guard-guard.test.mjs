@@ -1103,6 +1103,23 @@ describe("read path, taint and provenance (7.9)", () => {
     assert.deepEqual(lines(on).map((l) => l.decision), ["read", "refused"]);
   });
 
+  test("a read that reached the provider counts against the read limits even when it failed; one never sent does not", async (t) => {
+    const { guard } = mk(t, { policy: { ...ALL_ON, limits: { ...ALL_ON.limits, rate: { read_per_minute: 3 } } } });
+    const unsent = stub(() => ({ ok: false, error: { message: "refused before sending" }, sent: false }));
+    for (let i = 0; i < 4; i++) assert.equal((await read(guard, "thing_list", {}, { handler: unsent })).status, "failed");
+    assert.equal(guard.ledger.snapshot().count("read", "minute"), 0, "nothing was sent");
+    const down = stub(() => ({ ok: false, status: 503, error: { message: "down" }, sent: true }));
+    const missing = stub(() => ({ ok: false, status: 404, error: { message: "no such thing" }, sent: true }));
+    const hangup = stub(() => {
+      throw new Error("socket hang up");
+    });
+    for (const h of [down, missing, hangup]) assert.equal((await read(guard, "thing_list", {}, { handler: h })).status, "failed");
+    assert.equal(guard.ledger.snapshot().count("read", "minute"), 3);
+    const r = await read(guard, "thing_list", {}, { handler: down });
+    assert.equal(code(r), "rate_limited", "three failed reads reached the provider: the limit is used up");
+    assert.equal(down.calls.length, 1);
+  });
+
   test("read failures are redacted", async (t) => {
     const { guard } = mk(t);
     const r = await read(guard, "thing_list", {}, { handler: stub(() => ({ ok: false, status: 500, error: { message: `boom ${SECRET}` }, sent: true })) });

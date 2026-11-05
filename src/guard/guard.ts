@@ -1282,7 +1282,10 @@ export class Guard<P extends BasePolicy = BasePolicy> {
     } catch (e) {
       res = { ok: false, error: { message: this.redact(String((e as Error)?.message ?? e)) }, sent: true };
     }
-    if (reservation) this.#settle(reservation.id, res.ok ? "done" : "failed");
+    // A read that reached the provider counts against the read limits whatever it answered: one that
+    // fails, sent again and again, is still traffic, and an error can still tell something. Only a
+    // read that was never sent is released.
+    if (reservation) this.#settle(reservation.id, res.ok || res.sent ? "done" : "failed");
     if (!res.ok) {
       if (auditReads) this.#write({ ...base, decision: "failed", http_status: res.status ?? null });
       return { status: "failed", operation: op.operationId, ...(res.status !== undefined ? { http_status: res.status } : {}), error: this.#outError(res.error) };
