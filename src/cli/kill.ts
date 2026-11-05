@@ -207,6 +207,20 @@ export async function resetCommand(args: { server?: string }, io: CliIo): Promis
   if (!trips.length && !killCorrupt && !idemBroken) {
     return { code: EXIT.ok, data: { server, cleared: 0, broken_audit: broken.map((b) => b.file) }, text: [`Nothing to reset for ${server}.`, ...auditAdvice, ...manualNote] };
   }
+  // A running server checks the audit chains only when it starts: clearing its trips while a broken
+  // file is in place would let it run again until it restarts. The file goes first.
+  if (broken.length) {
+    return {
+      code: EXIT.fail,
+      data: { server, cleared: 0, refused: "audit_chain_broken", broken_audit: broken.map((b) => b.file) },
+      text: [
+        `Not resetting ${server}: ${broken.length === 1 ? "an audit chain is" : `${broken.length} audit chains are`} broken, and a running server checks them only when it starts, so it would run again with the broken file${broken.length === 1 ? "" : "s"} in place.`,
+        ...auditAdvice,
+        `Then run mcp-guard reset ${server} again.`,
+        ...manualNote,
+      ],
+    };
+  }
 
   const plan: string[] = [];
   for (const t of trips) plan.push(`clear the automatic trip (${t.scope}) from ${t.at}: ${t.reason}`);

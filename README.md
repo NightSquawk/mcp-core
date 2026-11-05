@@ -98,7 +98,7 @@ The package installs `mcp-guard`, which inspects and operates a guard install. I
 | `init <server>` | A starting policy, and the admin commands that install it. `--print` prints only the policy. |
 | `canary add <server>` | Add decoy records to the policy as salted hashes, and print the admin commands that install it. Ids come from the arguments or stdin; the salt is `NST_MCP_CANARY_SALT`. |
 | `kill`, `unkill` | Stop every group but `read`, or remove the manual kill marker. `kill --soft` trips your own state instead. |
-| `reset` | Clear automatic kill-switch trips, and move an unreadable idempotency store aside. |
+| `reset` | Clear automatic kill-switch trips, and move an unreadable idempotency store aside. Refuses while an audit chain is broken. |
 | `cancel` | Mark a pending or unknown call failed so a retry can run it, and stop its amount counting against the caps. Cancels nothing at the provider. |
 | `manifest` | Check a guard manifest. |
 | `verify <server>` | Pass, warn and fail checks of one install. `--strict` fails an unprotected policy. `--watch` reports changes to any client's MCP, hook or permission config since a baseline. |

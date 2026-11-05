@@ -1,6 +1,6 @@
 // mcp-guard reset: clears automatic trips and moves unreadable state aside, after confirmation.
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cli, dist, manualClock, sandbox, test } from "./cli-helpers.mjs";
 
@@ -119,6 +119,35 @@ test("reset explains a broken audit chain instead of touching it", async (t) => 
   assert.match(human.text, /audit chain in .* is broken at line 1/);
   assert.ok(human.out.some((l) => l === `  After you have inspected it: mv -- '${file}' '${file}.broken-${STAMP}'`));
   assert.equal(readFileSync(file, "utf8"), text, "reset never edits or moves the audit log");
+});
+
+test("reset refuses while an audit chain is broken: a running server would run again with it in place", async (t) => {
+  const sb = sandbox(t);
+  const dir = sb.serverState("column");
+  const log = new AuditLog(dir, "column", { clock: manualClock() });
+  const entry = { server: "column", version: "1", guard: "t", session: "s", tool: "x", operation: "op", tier: "read", group: "read", mode: "none", decision: "read", dry_run: false };
+  log.append(entry);
+  log.append(entry);
+  const file = log.files()[0];
+  writeFileSync(file, readFileSync(file, "utf8").replace('"operation":"op"', '"operation":"edited"'));
+  trip(sb, "column", `Audit chain broken in ${file} at line 1 (hash does not match the line).`);
+
+  const r = await cli(["reset", "column", "--json"], { env: sb.env, interactive: true, answers: ["column"] });
+  assert.equal(r.code, 1);
+  assert.equal(r.json.refused, "audit_chain_broken");
+  assert.deepEqual(r.json.broken_audit, [file]);
+  assert.equal(r.asked.length, 0, "nothing to confirm");
+  assert.equal(JSON.parse(readFileSync(join(dir, "kill.json"), "utf8")).trips.length, 1, "the trip stays");
+  const human = await cli(["reset", "column"], { env: sb.env, interactive: true });
+  assert.match(human.text, /^Not resetting column: an audit chain is broken, and a running server checks them only when it starts/);
+  assert.ok(human.out.some((l) => l === `  After you have inspected it: mv -- '${file}' '${file}.broken-${STAMP}'`));
+  assert.equal(human.out.at(-1), "Then run mcp-guard reset column again.");
+
+  renameSync(file, `${file}.broken-${STAMP}`);
+  const after = await cli(["reset", "column", "--json"], { env: sb.env, interactive: true, answers: ["column"] });
+  assert.equal(after.code, 0);
+  assert.equal(after.json.cleared, 1);
+  assert.deepEqual(after.json.broken_audit, []);
 });
 
 test("reset says the manual marker is separate", async (t) => {

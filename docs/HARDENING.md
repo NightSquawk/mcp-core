@@ -488,7 +488,7 @@ at a change in the file, don't paste it anywhere, then run `--accept`.
 | `mcp-guard kill <server>` / `kill --all` `[--note <text>]` | Writes the admin marker (`KILL`) next to the policy, or prints the commands to (exit 3). While it is set, every call but `read` is refused. Only an admin can clear it. |
 | `mcp-guard kill <server> --soft` | Trips the kill switch in your own state folder. Instant, but anything running as you can clear it. |
 | `mcp-guard unkill <server>` / `unkill --all` | Removes the manual marker. Asks you to type the server name, or `all`, at a terminal. |
-| `mcp-guard reset <server>` | Clears automatic trips and moves an unreadable idempotency store aside. Asks first. Does not clear the manual marker. |
+| `mcp-guard reset <server>` | Clears automatic trips and moves an unreadable idempotency store aside. Asks first. Refuses while an audit chain is broken, because a running server checks the chains only when it starts: move the file aside first (reset prints the command). Does not clear the manual marker. |
 | `mcp-guard cancel <key> [--server <server>]` | Marks a pending or unknown call failed, so a retry can run it, and releases its ledger reservation so its amount stops counting against the caps. Cancels nothing at the provider. |
 | `mcp-guard status [<server>]` | Shows the markers, trips and audit totals. |
 
