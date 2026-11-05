@@ -560,3 +560,38 @@ test("real probes: if passwordless sudo works here, part 2 says so", { skip: pro
     assert.ok(!part.reasons.some((x) => x.startsWith("Passwordless sudo")), JSON.stringify(part.reasons));
   }
 });
+
+// ------------------------------------------------------------------ probe program lookup
+
+test("resolveProbeProgram: never takes sudo, id or whoami from the inherited PATH", () => {
+  const stats = {
+    "/usr/bin": dirStat(),
+    "/usr/bin/sudo": fileStat(0, 0o104755),
+    "/usr/bin/id": fileStat(),
+    "/home/u/bin": dirStat(1000),
+    "/home/u/bin/sudo": fileStat(1000, 0o100755),
+    "/home/u/bin/doas": fileStat(1000, 0o100755),
+    "/usr/local/bin": dirStat(1000, 0o40755),
+    "/usr/local/bin/id2": fileStat(1000, 0o100755),
+  };
+  const stat = (p) => stats[p] ?? null;
+  const env = { PATH: "/home/u/bin:/usr/local/bin:/usr/bin" };
+  assert.deepEqual(P.resolveProbeProgram("sudo", "linux", env, stat), { path: "/usr/bin/sudo" }, "the shim earlier on PATH is skipped");
+  assert.deepEqual(P.resolveProbeProgram("id", "darwin", env, stat), { path: "/usr/bin/id" });
+  assert.deepEqual(P.resolveProbeProgram("doas", "linux", env, stat), { error: "EUNTRUSTED" }, "found only in a user folder: unknown, not missing");
+  assert.deepEqual(P.resolveProbeProgram("id2", "linux", env, stat), { error: "EUNTRUSTED" }, "a user-owned /usr/local/bin does not count");
+  assert.deepEqual(P.resolveProbeProgram("nope", "linux", env, stat), { error: "ENOENT" });
+  const writable = { ...stats, "/usr/bin": dirStat(0, 0o40777) };
+  assert.deepEqual(P.resolveProbeProgram("sudo", "linux", {}, (p) => writable[p] ?? null), { error: "ENOENT" }, "a world-writable folder does not count");
+  const win = { "C:\\Windows\\System32\\whoami.exe": fileStat() };
+  assert.deepEqual(P.resolveProbeProgram("whoami", "win32", { PATH: "C:\\Users\\u\\bin", SystemRoot: "D:\\Evil" }, (p) => win[p] ?? null), {
+    path: "C:\\Windows\\System32\\whoami.exe",
+  });
+});
+
+test("POSIX part 2 fails closed when sudo is found only outside the trusted folders", () => {
+  const probes = fakeProbes({ runs: { "sudo -n true": { status: null, stdout: "", stderr: "", error: "EUNTRUSTED" }, "id -Gn": { status: 0, stdout: "u\n", stderr: "" } } });
+  const part = P.posixPart2(probes);
+  assert.equal(part.ok, false);
+  assert.match(part.reasons.join(" "), /EUNTRUSTED/);
+});

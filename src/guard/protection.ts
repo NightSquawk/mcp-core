@@ -9,7 +9,7 @@
  * `id`, `whoami` and `reg query`, and read doas.conf; none of them changes anything.
  */
 import { spawnSync } from "node:child_process";
-import { closeSync, lstatSync, openSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, lstatSync, openSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { posix, win32 } from "node:path";
 import { randomBytes } from "node:crypto";
 import { DEFAULT_PROGRAM_DATA, programDataDir } from "./paths.js";
@@ -206,6 +206,68 @@ const REMOTE_PATHS_NOTE =
   "This check cannot see remote paths to admin: an SSH or Tailscale SSH key into root or an admin account, or an RMM API key " +
   "that can run scripts (they run as root/SYSTEM). The agent's user must not be able to read any of these (hardening SOP).";
 
+/** Folders the POSIX probes look in for sudo, doas and id, in order. */
+export const TRUSTED_POSIX_BIN_DIRS = Object.freeze(["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/usr/local/bin", "/usr/local/sbin"]);
+
+/** Owner and mode of a path after following symlinks, or null when it does not exist. */
+export interface ProgramStat {
+  isFile: boolean;
+  isDirectory: boolean;
+  uid: number;
+  mode: number;
+}
+
+export type ProbeProgram = { path: string } | { error: "ENOENT" | "EUNTRUSTED" };
+
+/**
+ * Where a probe runs `cmd` from, never from the inherited PATH: a PATH the agent can change would let
+ * a shim named sudo, doas, id, whoami or reg answer for the real one and make part 2 pass.
+ *
+ * POSIX: the first trusted bin folder holding the program, where the folder and the file are owned by
+ * root and not writable by group or others (so a user-owned /usr/local/bin, as Homebrew leaves it on
+ * Intel macOS, does not count). A program found only elsewhere on PATH is EUNTRUSTED, which the checks
+ * treat as unknown (fail closed); one found nowhere is ENOENT. Windows: System32 of C:\Windows, or of
+ * SystemRoot when C:\Windows does not exist.
+ */
+export function resolveProbeProgram(
+  cmd: string,
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv,
+  stat: (path: string) => ProgramStat | null
+): ProbeProgram {
+  if (platform === "win32") {
+    const roots = ["C:\\Windows"];
+    const sysRoot = env.SystemRoot ?? env.SYSTEMROOT;
+    if (sysRoot && win32.isAbsolute(sysRoot)) roots.push(sysRoot);
+    for (const root of roots) {
+      const path = win32.join(root, "System32", `${cmd}.exe`);
+      if (stat(path)?.isFile) return { path };
+    }
+    return { error: "ENOENT" };
+  }
+  const safe = (s: ProgramStat | null) => s !== null && s.uid === 0 && (s.mode & 0o022) === 0;
+  for (const dir of TRUSTED_POSIX_BIN_DIRS) {
+    const path = posix.join(dir, cmd);
+    const f = stat(path);
+    if (!f?.isFile) continue;
+    const d = stat(dir);
+    if (d?.isDirectory && safe(d) && safe(f)) return { path };
+  }
+  for (const dir of (env.PATH ?? "").split(":")) {
+    if (dir && stat(posix.join(dir, cmd))?.isFile) return { error: "EUNTRUSTED" };
+  }
+  return { error: "ENOENT" };
+}
+
+function statProgram(path: string): ProgramStat | null {
+  try {
+    const s = statSync(path);
+    return { isFile: s.isFile(), isDirectory: s.isDirectory(), uid: s.uid, mode: s.mode };
+  } catch {
+    return null;
+  }
+}
+
 export function realProbes(): ProtectionProbes {
   return {
     platform: process.platform,
@@ -226,11 +288,15 @@ export function realProbes(): ProtectionProbes {
       }
     },
     run(cmd, args) {
-      const r = spawnSync(cmd, [...args], {
+      const program = resolveProbeProgram(cmd, process.platform, process.env, statProgram);
+      if ("error" in program) return { status: null, stdout: "", stderr: "", error: program.error };
+      const env: NodeJS.ProcessEnv = { ...process.env, LC_ALL: "C", LANG: "C" };
+      if (process.platform !== "win32") env.PATH = TRUSTED_POSIX_BIN_DIRS.join(":");
+      const r = spawnSync(program.path, [...args], {
         encoding: "utf8",
         timeout: 5_000,
         stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, LC_ALL: "C", LANG: "C" },
+        env,
         windowsHide: true,
       });
       return {
@@ -258,7 +324,9 @@ export function realProbes(): ProtectionProbes {
     windowsOwners(paths) {
       // Fail closed without starting PowerShell: such a path cannot be quoted onto one stdin line.
       if (paths.some(hasUnsafePathChar)) return null;
-      const r = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "-"], {
+      const ps = resolveProbeProgram("WindowsPowerShell\\v1.0\\powershell", "win32", process.env, statProgram);
+      if ("error" in ps) return null;
+      const r = spawnSync(ps.path, ["-NoProfile", "-NonInteractive", "-Command", "-"], {
         input: windowsOwnersScript(paths) + "\r\n",
         encoding: "utf8",
         timeout: 15_000,
