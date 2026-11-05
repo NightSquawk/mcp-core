@@ -177,7 +177,13 @@ export function renderRead(out: ReadOutcome, maxChars = DEFAULT_MAX_RESULT_CHARS
     ...untrustedPart(out.untrusted_fields, out.untrusted_whole),
     result: out.data,
   };
-  const s = JSON.stringify(payload);
+  let s: string;
+  try {
+    s = JSON.stringify(payload);
+  } catch {
+    // Guard.read already fails such a read; this covers an outcome built some other way.
+    return text({ operation_id: out.operation, status: out.http_status ?? null, error: { message: "The result could not be serialized as JSON, so it is not returned." } }, true);
+  }
   if (s.length > maxChars) return text(tooLarge(s.length, maxChars), true);
   return { content: [{ type: "text", text: s }] };
 }

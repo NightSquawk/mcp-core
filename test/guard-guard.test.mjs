@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { canaryHash, createGuard, LockTimeoutError, PROPOSAL_TTL_MS, refuse, renderExecute, staticProtection, TIER_GROUP } from "../dist/guard/index.js";
+import { canaryHash, createGuard, LockTimeoutError, PROPOSAL_TTL_MS, refuse, renderExecute, renderRead, staticProtection, TIER_GROUP } from "../dist/guard/index.js";
 import { ALL_ON, BIDI, manualClock, op, sandbox, SECRET, stub, toyExtract, ZW } from "./guard-helpers.mjs";
 
 function mk(t, o = {}) {
@@ -859,6 +859,26 @@ describe("read path, taint and provenance (7.9)", () => {
     const r = await read(guard, "thing_list", {}, { handler: stub(() => ({ ok: false, status: 500, error: { message: `boom ${SECRET}` }, sent: true })) });
     assert.equal(r.status, "failed");
     assert.ok(!JSON.stringify(r).includes(SECRET));
+  });
+
+  test("a read whose answer cannot be serialized fails with a reason, never an internal error", async (t) => {
+    const { guard } = mk(t, { policy: { ...ALL_ON, audit: { reads: true } } });
+    const big = await read(guard, "thing_get", { pathParams: { id: "thing_1" } }, { fields: ["note"], handler: stub(() => ({ ok: true, status: 200, data: { id: "thing_1", balance: 10n } })) });
+    assert.equal(big.status, "failed");
+    assert.equal(big.http_status, 200);
+    assert.match(big.error.message, /^The provider answered, but its answer could not be processed \(.*BigInt.*\), so it is not returned\.$/);
+    const rendered = renderRead(big);
+    assert.equal(rendered.isError, true);
+    assert.deepEqual(JSON.parse(rendered.content[0].text), { operation_id: "thing_get", status: 200, error: big.error });
+    assert.equal(lines(guard).at(-1).decision, "failed");
+    assert.equal(lines(guard).at(-1).note, big.error.message);
+
+    const odd = { toJSON: () => { throw new Error(`cannot encode ${SECRET}`); } };
+    const thrown = await read(guard, "thing_list", {}, { handler: stub(() => ({ ok: true, status: 200, data: { items: [odd] } })) });
+    assert.equal(thrown.status, "failed");
+    assert.match(thrown.error.message, /could not be processed \(cannot encode /);
+    assert.ok(!JSON.stringify(thrown).includes(SECRET), "the reason is redacted");
+    assert.ok(!JSON.stringify(lines(guard)).includes(SECRET));
   });
 });
 

@@ -1213,8 +1213,18 @@ export class Guard<P extends BasePolicy = BasePolicy> {
       return { status: "failed", operation: op.operationId, ...(res.status !== undefined ? { http_status: res.status } : {}), error: this.#redactOut(res.error) };
     }
 
-    // Untrusted content (7.9): label, sanitize, taint, provenance.
-    const processed = this.#processResult(op, res.data, input.untrustedFields, true);
+    // Untrusted content (7.9): label, sanitize, taint, provenance. An answer that cannot be
+    // processed or serialized (a bigint, a toJSON that throws) is not returned: the read fails
+    // with a reason instead of the client getting an internal error.
+    let processed: { data: unknown; untrusted: number; whole: boolean };
+    try {
+      processed = this.#processResult(op, res.data, input.untrustedFields, true);
+      JSON.stringify(processed.data);
+    } catch (e) {
+      const message = `The provider answered, but its answer could not be processed (${this.redact(String((e as Error)?.message ?? e))}), so it is not returned.`;
+      if (auditReads) this.#write({ ...base, decision: "failed", http_status: res.status ?? null, note: message });
+      return { status: "failed", operation: op.operationId, ...(res.status !== undefined ? { http_status: res.status } : {}), error: { message } };
+    }
     if (auditReads) this.#write({ ...base, decision: "read", http_status: res.status ?? null });
     return {
       status: "done",

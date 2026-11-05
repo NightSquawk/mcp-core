@@ -145,6 +145,11 @@ describe("render functions", () => {
     assert.deepEqual(JSON.parse(failed.content[0].text), { operation_id: "x", status: 500, error: { message: "boom" } });
     const big = renderRead({ status: "done", operation: "x", http_status: 200, data: "y".repeat(50) }, 20);
     assert.equal(JSON.parse(big.content[0].text).reason_code, "result_too_large");
+    for (const data of [{ n: 10n }, { toJSON: () => { throw new Error("no"); } }]) {
+      const odd = renderRead({ status: "done", operation: "x", http_status: 200, data });
+      assert.equal(odd.isError, true, "an outcome that cannot be serialized is an error result, not a throw");
+      assert.deepEqual(JSON.parse(odd.content[0].text), { operation_id: "x", status: 200, error: { message: "The result could not be serialized as JSON, so it is not returned." } });
+    }
   });
 
   test("renderExecute error and success shapes", () => {
