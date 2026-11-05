@@ -1,9 +1,9 @@
 /**
  * @nightsquawktech/mcp-core/catalog — primitives for catalog-backed MCP servers.
  *
- * These use the SDK's single-schema `server.tool(...)` registration form and a
- * generic on-disk catalog loader. The list/describe/call tool factories stay
- * per-server (their spec shapes and write-gates differ too much to share).
+ * `RegisterTool` uses the SDK's `registerTool()` with a single `{ params }` input
+ * schema, plus a generic on-disk catalog loader. The list/describe/call tool
+ * factories stay per-server (their spec shapes and write-gates differ too much to share).
  */
 
 export type { ToolDefinition } from "./tool-definition.js";

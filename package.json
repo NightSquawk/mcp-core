@@ -1,7 +1,7 @@
 {
   "name": "@nightsquawktech/mcp-core",
-  "version": "0.1.0",
-  "description": "Shared runtime for NightSquawk catalog-backed MCP servers: stdio bootstrap plus catalog registration + loader primitives.",
+  "version": "0.3.0-dev.0",
+  "description": "Shared runtime for NightSquawk catalog-backed MCP servers: stdio bootstrap, catalog primitives, and the guard (tiers, policy, approvals, audit).",
   "license": "AGPL-3.0-only",
   "type": "module",
   "exports": {
@@ -12,7 +12,18 @@
     "./catalog": {
       "types": "./dist/catalog/index.d.ts",
       "default": "./dist/catalog/index.js"
+    },
+    "./guard": {
+      "types": "./dist/guard/index.d.ts",
+      "default": "./dist/guard/index.js"
+    },
+    "./guard/testing": {
+      "types": "./dist/guard/testing/index.d.ts",
+      "default": "./dist/guard/testing/index.js"
     }
+  },
+  "bin": {
+    "mcp-guard": "dist/cli/index.js"
   },
   "files": [
     "dist",
@@ -24,13 +35,15 @@
     "build": "tsc",
     "prepare": "npm run build",
     "watch": "tsc --watch",
-    "clean": "rimraf dist"
+    "clean": "rimraf dist",
+    "test": "npm run build && node scripts/run-tests.mjs",
+    "test:coverage": "npm run build && node scripts/run-tests.mjs --experimental-test-coverage"
   },
   "engines": {
     "node": ">=20"
   },
   "peerDependencies": {
-    "@modelcontextprotocol/sdk": ">=1.6.0 <2",
+    "@modelcontextprotocol/sdk": ">=1.18.0 <2",
     "zod": "^3.24.0"
   },
   "devDependencies": {
