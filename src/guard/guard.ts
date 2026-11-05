@@ -854,6 +854,11 @@ export class Guard<P extends BasePolicy = BasePolicy> {
         message: decision.message ?? "Waiting for a human approver. This agent cannot approve it.",
       };
     }
+    // An approval that comes back after the proposal expired approves nothing.
+    if (!(this.#clock().getTime() <= Date.parse(proposal.expires_at))) {
+      release();
+      return this.#refused(base, refuse("approval_expired", `The approval came back after the proposal expired at ${proposal.expires_at}. Nothing was sent; ask again.`));
+    }
 
     // 7. Pre-image.
     if (PREIMAGE_TIERS.has(op.tier) && input.hooks?.fetchCurrent) {

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { canaryHash, createGuard, refuse, staticProtection, TIER_GROUP } from "../dist/guard/index.js";
+import { canaryHash, createGuard, PROPOSAL_TTL_MS, refuse, staticProtection, TIER_GROUP } from "../dist/guard/index.js";
 import { ALL_ON, BIDI, manualClock, op, sandbox, SECRET, stub, toyExtract, ZW } from "./guard-helpers.mjs";
 
 function mk(t, o = {}) {
@@ -385,6 +385,29 @@ describe("step 6: approval", () => {
     const { guard } = mk(t, { guard: { approvers: { none: broken } } });
     assert.equal(code(await exec(guard, "thing_create", { body: {} })), "approver_failed");
     assert.equal(guard.idempotency.entries()[0].status, "failed");
+  });
+
+  test("an approval that comes back after the proposal expired sends nothing and releases the key", async (t) => {
+    const clock = manualClock("2026-11-04T10:00:00.000Z");
+    let wait = PROPOSAL_TTL_MS + 1;
+    const slow = {
+      name: "none",
+      human: true,
+      request: async () => {
+        clock.advance(wait);
+        return { result: "approved", approver: "none", human: true };
+      },
+    };
+    const { guard } = mk(t, { guard: { approvers: { none: slow }, clock } });
+    const h = stub();
+    const late = await exec(guard, "thing_create", { body: { a: 1 } }, { handler: h });
+    assert.equal(code(late), "approval_expired");
+    assert.match(late.refusal.message, /expired at 2026-11-04T10:05:00\.000Z/);
+    assert.equal(h.calls.length, 0, "nothing was sent");
+    assert.equal(guard.idempotency.entries()[0].status, "failed", "released, so asking again can run");
+    wait = PROPOSAL_TTL_MS;
+    assert.equal(code(await exec(guard, "thing_create", { body: { a: 1 } }, { handler: h })), "done", "an answer at the expiry instant still counts");
+    assert.equal(h.calls.length, 1);
   });
 
   test("amount thresholds pick the approver; G4 features fail closed", async (t) => {
