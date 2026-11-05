@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { canaryHash, createGuard, PROPOSAL_TTL_MS, refuse, staticProtection, TIER_GROUP } from "../dist/guard/index.js";
+import { canaryHash, createGuard, LockTimeoutError, PROPOSAL_TTL_MS, refuse, renderExecute, staticProtection, TIER_GROUP } from "../dist/guard/index.js";
 import { ALL_ON, BIDI, manualClock, op, sandbox, SECRET, stub, toyExtract, ZW } from "./guard-helpers.mjs";
 
 function mk(t, o = {}) {
@@ -348,6 +348,61 @@ describe("step 5: idempotency and dry_run", () => {
     });
     assert.equal(thrown.status, "unknown_outcome");
     assert.ok(!JSON.stringify(thrown).includes(SECRET));
+  });
+
+  test("a sent call whose answer cannot be processed is still settled, with the answer left out", async (t) => {
+    const { guard } = mk(t);
+    const h = stub(() => ({ ok: true, status: 200, data: { id: "obj_1", balance: 10n }, providerIds: ["obj_1"] }));
+    const r = await exec(guard, "thing_create", { body: { a: 1 } }, { handler: h });
+    assert.equal(r.status, "done");
+    assert.equal(r.data, undefined);
+    assert.match(r.warnings[0], /answer could not be processed \(.*BigInt.*\), so it is left out; read the object back with toy_read/);
+    assert.doesNotThrow(() => renderExecute(r));
+    assert.equal(guard.idempotency.entries()[0].status, "done");
+    assert.deepEqual(JSON.parse(readFileSync(guard.ledger.file, "utf8")).events.map((e) => e.status), ["done"]);
+    assert.equal(lines(guard).at(-1).decision, "executed");
+    assert.equal((await exec(guard, "thing_create", { body: { a: 1 } }, { handler: h })).status, "deduplicated");
+    assert.equal(h.calls.length, 1, "never sent twice");
+
+    const held = mk(t, { policy: { ...ALL_ON, approval: { ...ALL_ON.approval, spend: "external" } } });
+    const hold = { external: () => ({ held: true, ref: "tr_9", status: "pending_review" }) };
+    const p = await exec(held.guard, "payment_create", pay(), { handler: stub(() => ({ ok: true, status: 200, data: { amount: 5n } })), hooks: hold });
+    assert.equal(p.status, "pending");
+    assert.match(p.message, /could not be processed/);
+    assert.equal(held.guard.idempotency.entries()[0].status, "pending");
+  });
+
+  test("after sending, a ledger or kill switch that cannot be written is a note, never an error", async (t) => {
+    const { guard } = mk(t);
+    guard.ledger.settle = () => {
+      throw new Error("disk full");
+    };
+    const r = await exec(guard, "thing_create", { body: { a: 1 } });
+    assert.equal(r.status, "done");
+    assert.match(r.warnings.join(" "), /The ledger could not record this call as done: disk full/);
+    assert.equal(guard.idempotency.entries()[0].status, "done");
+    assert.match(lines(guard).at(-1).note, /disk full/);
+
+    const live = mk(t, { policy: { ...ALL_ON, approval: { ...ALL_ON.approval, spend: "external" } }, mode: "live" });
+    live.guard.kill.trip = () => {
+      throw new LockTimeoutError("Timed out waiting for kill.lock.");
+    };
+    const notHeld = await exec(live.guard, "payment_create", pay(), { hooks: { external: () => ({ held: false }) } });
+    assert.equal(notHeld.status, "done");
+    assert.match(notHeld.warnings.join(" "), /Setting the spend kill switch failed: Timed out waiting for kill\.lock\./);
+    assert.equal(live.guard.idempotency.entries()[0].status, "done");
+  });
+
+  test("a ledger that cannot be locked before sending refuses and releases the key", async (t) => {
+    const { guard } = mk(t);
+    guard.ledger.reserve = () => {
+      throw new LockTimeoutError("Timed out waiting for ledger.lock.");
+    };
+    const h = stub();
+    const r = await exec(guard, "thing_create", { body: { a: 1 } }, { handler: h });
+    assert.equal(code(r), "state_unreadable");
+    assert.equal(h.calls.length, 0);
+    assert.equal(guard.idempotency.entries()[0].status, "failed", "released, not left in flight");
   });
 
   test("the local window lets an old non-native duplicate run again; native keys hold for the day", async (t) => {

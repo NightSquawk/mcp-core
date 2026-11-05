@@ -26,7 +26,7 @@ import { computeEffective, readNarrowing, type Effective, type GroupState, type 
 import { IdempotencyStateError, IdempotencyStore, MIN_KEY_LENGTH, deriveKey, type IdemEntry } from "./idempotency.js";
 import { LockTimeoutError } from "./lock.js";
 import { KillSwitch, type KillState } from "./kill-switch.js";
-import { Ledger, type LedgerSnapshot } from "./ledger.js";
+import { Ledger, type LedgerSnapshot, type LedgerStatus } from "./ledger.js";
 import { buildManifest, type GuardManifest } from "./manifest.js";
 import { killMarkers, stateDir as defaultStateDir, assertServerName } from "./paths.js";
 import { approverFor, basePolicySchema, loadPolicy, type ApproverName, type BasePolicy, type LoadedPolicy } from "./policy.js";
@@ -500,6 +500,26 @@ export class Guard<P extends BasePolicy = BasePolicy> {
     }
   }
 
+  /** Settle a ledger reservation; never throws (the call may already have been sent). Returns a note when it failed. */
+  #settle(id: string, status: Exclude<LedgerStatus, "reserved">): string | null {
+    try {
+      this.ledger.settle(id, status);
+      return null;
+    } catch (e) {
+      return `The ledger could not record this call as ${status}: ${this.redact(String((e as Error)?.message ?? e))}`;
+    }
+  }
+
+  /** Trip a group's kill switch after a call was sent; never throws. Returns the note saying what happened. */
+  #tripAfterSend(group: Group, reason: string): string {
+    try {
+      this.kill.trip(group, reason);
+      return `${reason} The ${group} kill switch is now set.`;
+    } catch (e) {
+      return `${reason} Setting the ${group} kill switch failed: ${this.redact(String((e as Error)?.message ?? e))}`;
+    }
+  }
+
   /** A refusal for an unreadable idempotency store (fail closed), or rethrow anything else. */
   #stateRefusal(e: unknown): Refusal {
     if (e instanceof IdempotencyStateError || e instanceof LockTimeoutError) {
@@ -902,10 +922,16 @@ export class Guard<P extends BasePolicy = BasePolicy> {
       release();
       return this.#refused(base, refuse("request_changed", "The stored request changed after it was checked; refused."));
     }
-    const reservation = this.ledger.reserve(
-      { group, op: op.operationId, ...(typeof extraction.amount_cents === "number" ? { cents: extraction.amount_cents } : {}), ...(extraction.currency ? { currency: extraction.currency } : {}) },
-      (s) => (group === "spend" ? this.#spendRefusal(extraction.amount_cents as number, extraction.currency as string, s, providerToday) : null) ?? this.#rateRefusal(group, s)
-    );
+    let reservation: { refusal: Refusal } | { id: string };
+    try {
+      reservation = this.ledger.reserve(
+        { group, op: op.operationId, ...(typeof extraction.amount_cents === "number" ? { cents: extraction.amount_cents } : {}), ...(extraction.currency ? { currency: extraction.currency } : {}) },
+        (s) => (group === "spend" ? this.#spendRefusal(extraction.amount_cents as number, extraction.currency as string, s, providerToday) : null) ?? this.#rateRefusal(group, s)
+      );
+    } catch (e) {
+      release();
+      return this.#refused(base, this.#stateRefusal(e));
+    }
     if ("refusal" in reservation) {
       release();
       return this.#refused(base, reservation.refusal);
@@ -914,12 +940,12 @@ export class Guard<P extends BasePolicy = BasePolicy> {
     // time after the approval: a proposal that expired meanwhile approves nothing either.
     if (!(this.#clock().getTime() <= Date.parse(proposal.expires_at))) {
       release();
-      this.ledger.settle(reservation.id, "failed");
+      this.#settle(reservation.id, "failed");
       return this.#refused(base, refuse("approval_expired", `The proposal expired at ${proposal.expires_at} before the call could be sent. Nothing was sent; ask again.`));
     }
     if (this.policy.client_scope?.lock_per_session && client !== null && !this.session.lockClient(client)) {
       release();
-      this.ledger.settle(reservation.id, "failed");
+      this.#settle(reservation.id, "failed");
       return this.#refused(base, refuse("client_locked", `This session is pinned to ${this.session.lockedClient}.`));
     }
 
@@ -936,8 +962,7 @@ export class Guard<P extends BasePolicy = BasePolicy> {
       const rejected = !res.sent || (res.status !== undefined && res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 409);
       const error = this.#redactOut(res.error);
       if (rejected) {
-        const stateNote = this.#finish(key, "failed", { http_status: res.status ?? null });
-        this.ledger.settle(reservation.id, "failed");
+        const stateNote = [this.#finish(key, "failed", { http_status: res.status ?? null }), this.#settle(reservation.id, "failed")].filter(Boolean).join(" ");
         this.#write({ ...base, decision: "failed", http_status: res.status ?? null, duration_ms, ...(stateNote ? { note: stateNote } : {}) });
         return {
           status: "failed",
@@ -951,14 +976,28 @@ export class Guard<P extends BasePolicy = BasePolicy> {
       return this.#unknownOutcome({ key, reservationId: reservation.id, base, op, status: res.status, duration_ms, error, said: "The provider may or may not have done this." });
     }
 
-    // Untrusted content (7.9) is labelled and taints the session on this path too.
-    const processed = this.#processResult(op, res.data, input.untrustedFields, false);
-    const data = processed.data;
-    const untrustedInfo = {
-      ...(processed.untrusted ? { untrusted_fields: processed.untrusted } : {}),
-      ...(processed.whole ? { untrusted_whole: true } : {}),
-    };
-    const providerIds = res.providerIds?.map((id) => this.redact(id));
+    // The provider did it: from here nothing may throw before the key, the reservation and the
+    // audit line are settled. An answer that cannot be processed or stored (a bigint, a toJSON
+    // that throws) is left out of the result instead.
+    const warnings: string[] = [];
+    let data: unknown;
+    let stored: string | undefined;
+    let untrustedInfo: { untrusted_fields?: number; untrusted_whole?: true } = {};
+    let dropped: string | null = null;
+    try {
+      // Untrusted content (7.9) is labelled and taints the session on this path too.
+      const processed = this.#processResult(op, res.data, input.untrustedFields, false);
+      stored = JSON.stringify(processed.data);
+      data = processed.data;
+      untrustedInfo = {
+        ...(processed.untrusted ? { untrusted_fields: processed.untrusted } : {}),
+        ...(processed.whole ? { untrusted_whole: true } : {}),
+      };
+    } catch (e) {
+      dropped = `The provider's answer could not be processed (${this.redact(String((e as Error)?.message ?? e))}), so it is left out; read the object back with ${this.toolName("read")}.`;
+      warnings.push(dropped);
+    }
+    const providerIds = res.providerIds?.map((id) => this.redact(String(id)));
     let hold: ExternalHold = { held: false };
     if (input.hooks?.external) {
       try {
@@ -969,33 +1008,27 @@ export class Guard<P extends BasePolicy = BasePolicy> {
         let note: string | undefined;
         if (approver.name === "external" && this.mode !== "sandbox") {
           const reason = `${op.operationId} ran under the external approver, but whether the provider held it for a human could not be read.`;
-          this.kill.trip(group, reason);
+          note = this.#tripAfterSend(group, reason);
           this.#write({ ...base, decision: "alert", alert: "external_hold_unreadable", note: reason, provider_ids: providerIds });
-          note = `${reason} The ${group} kill switch is now set.`;
         }
         return this.#unknownOutcome({ key, reservationId: reservation.id, base, op, status: res.status, duration_ms, error, providerIds, note, said: "The provider accepted this, but whether it did it or holds it for a human could not be read." });
       }
     }
-    const warnings: string[] = [];
     if (approver.name === "external" && !hold.held) {
       const reason = `${op.operationId} ran under the external approver but the provider did not hold it for a human.`;
       if (this.mode === "sandbox") warnings.push(`${reason} (Sandbox: the key may not have approvals configured.)`);
       else {
-        this.kill.trip(group, reason);
-        warnings.push(`${reason} The ${group} kill switch is now set.`);
+        warnings.push(this.#tripAfterSend(group, reason));
         this.#write({ ...base, decision: "alert", alert: "external_not_held", note: reason, provider_ids: providerIds });
       }
     }
-    const stored = JSON.stringify(data);
     const result = {
       http_status: res.status ?? null,
       ...(providerIds?.length ? { provider_ids: providerIds } : {}),
       ...(stored !== undefined && stored.length <= DEDUP_DATA_CHARS ? { data } : {}),
       ...(hold.held ? { pending: { ref: hold.ref, status: hold.status, url: hold.url } } : {}),
     };
-    const stateNote = this.#finish(key, hold.held ? "pending" : "done", result);
-    if (stateNote) warnings.push(stateNote);
-    this.ledger.settle(reservation.id, hold.held ? "pending" : "done");
+    for (const note of [this.#finish(key, hold.held ? "pending" : "done", result), this.#settle(reservation.id, hold.held ? "pending" : "done")]) if (note) warnings.push(note);
     this.#write({ ...base, decision: hold.held ? "pending" : "executed", http_status: res.status ?? null, provider_ids: providerIds, duration_ms, ...(warnings.length ? { note: warnings.join(" ") } : {}) });
 
     if (hold.held) {
@@ -1008,7 +1041,7 @@ export class Guard<P extends BasePolicy = BasePolicy> {
         hold,
         data,
         ...untrustedInfo,
-        message: hold.message ?? "The provider is holding this for a human to approve. This agent cannot approve it.",
+        message: [hold.message ?? "The provider is holding this for a human to approve. This agent cannot approve it.", dropped].filter(Boolean).join(" "),
       };
     }
     return {
@@ -1037,9 +1070,7 @@ export class Guard<P extends BasePolicy = BasePolicy> {
     providerIds?: string[];
     note?: string;
   }): ExecuteOutcome {
-    const stateNote = this.#finish(o.key, "unknown", { http_status: o.status ?? null });
-    this.ledger.settle(o.reservationId, "unknown");
-    const note = [o.note, stateNote].filter(Boolean).join(" ");
+    const note = [o.note, this.#finish(o.key, "unknown", { http_status: o.status ?? null }), this.#settle(o.reservationId, "unknown")].filter(Boolean).join(" ");
     this.#write({ ...o.base, decision: "unknown_outcome", http_status: o.status ?? null, ...(o.providerIds?.length ? { provider_ids: o.providerIds } : {}), duration_ms: o.duration_ms, ...(note ? { note } : {}) });
     return {
       status: "unknown_outcome",
@@ -1173,7 +1204,7 @@ export class Guard<P extends BasePolicy = BasePolicy> {
     } catch (e) {
       res = { ok: false, error: { message: this.redact(String((e as Error)?.message ?? e)) }, sent: true };
     }
-    if (reservation) this.ledger.settle(reservation.id, res.ok ? "done" : "failed");
+    if (reservation) this.#settle(reservation.id, res.ok ? "done" : "failed");
     if (!res.ok) {
       if (auditReads) this.#write({ ...base, decision: "failed", http_status: res.status ?? null });
       return { status: "failed", operation: op.operationId, ...(res.status !== undefined ? { http_status: res.status } : {}), error: this.#redactOut(res.error) };
