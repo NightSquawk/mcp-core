@@ -148,6 +148,37 @@ describe("step 4: argument checks", () => {
     assert.ok(!JSON.stringify(r).includes(SECRET));
   });
 
+  test("per_day reads the provider's total again after approval, so spend made while the approver waited counts", async (t) => {
+    let provider = 0;
+    const reads = [];
+    const slow = { name: "none", human: true, request: async () => ((provider = 47000), { result: "approved", approver: "none", human: true }) };
+    const { guard } = mk(t, { guard: { providerTotals: async () => (reads.push(provider), provider), approvers: { none: slow } } });
+    const h = stub();
+    const r = await exec(guard, "payment_create", pay(5000), { handler: h });
+    assert.equal(code(r), "over_per_day");
+    assert.equal(r.refusal.details.today_cents, 47000);
+    assert.deepEqual(reads, [0, 47000], "read before asking the approver and again after");
+    assert.equal(h.calls.length, 0, "nothing was sent");
+    assert.equal(guard.idempotency.entries()[0].status, "failed", "released");
+
+    let n = 0;
+    const flaky = mk(t, {
+      guard: {
+        providerTotals: async () => {
+          if (++n === 2) throw new Error(`down ${SECRET}`);
+          return 0;
+        },
+      },
+    });
+    const h2 = stub();
+    const again = await exec(flaky.guard, "payment_create", pay(), { handler: h2 });
+    assert.equal(code(again), "provider_totals_unavailable");
+    assert.match(again.refusal.message, /again after approval/);
+    assert.ok(!JSON.stringify(again).includes(SECRET));
+    assert.equal(h2.calls.length, 0);
+    assert.equal(flaky.guard.idempotency.entries()[0].status, "failed");
+  });
+
   test("rate limits per group and window", async (t) => {
     const { guard } = mk(t, { policy: { ...ALL_ON, limits: { ...ALL_ON.limits, rate: { change_per_minute: 1, spend_per_day: 1 } } } });
     assert.equal(code(await exec(guard, "thing_create", { body: { n: 1 } })), "done");

@@ -247,7 +247,10 @@ export interface GuardOptions<P extends BasePolicy = BasePolicy> {
   /** Extra or replacement approvers (G4 approvers, tests). */
   approvers?: Partial<Record<ApproverName, Approver>>;
   serverCheck?: (group: Group, policy: P) => ServerCheckResult | null;
-  /** Today's spend in `currency` as the provider reports it, in cents (cross-check for per_day). */
+  /**
+   * Today's spend in `currency` as the provider reports it, in cents (cross-check for per_day). It is
+   * read before the approver is asked and again just before the call is sent.
+   */
   providerTotals?: (currency: string) => Promise<number>;
   /** The client for calls whose extractor does not report one. */
   defaultClient?: (policy: P) => string | null;
@@ -872,6 +875,17 @@ export class Guard<P extends BasePolicy = BasePolicy> {
     }
 
     // 8. Execute: re-check, reserve, run the stored request.
+    // The provider's total was read before the approver was asked, which can take minutes. Read it
+    // again, so spend made elsewhere in the meantime counts against the daily cap.
+    if (providerToday !== null && this.#opts.providerTotals) {
+      try {
+        providerToday = await this.#opts.providerTotals(extraction.currency as string);
+        if (!Number.isFinite(providerToday)) throw new Error("not a number");
+      } catch (e) {
+        release();
+        return this.#refused(base, refuse("provider_totals_unavailable", `Could not read today's total from the provider again after approval (${this.redact(String((e as Error)?.message ?? e))}), so the daily cap cannot be checked.`));
+      }
+    }
     const stoppedNow = this.kill.stopped(group);
     if (stoppedNow) {
       release();
