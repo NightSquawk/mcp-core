@@ -164,6 +164,36 @@ test("ledger: release frees only the open reservations of that call", (t) => {
   assert.equal(l.release("nobody"), 0);
 });
 
+test("ledger: a retry under the key of an unknown-outcome call replaces it, in the check and the totals", (t) => {
+  const l = new Ledger(tempDir(t), { clock: manualClock("2026-11-04T12:00:00.000Z") });
+  const cap = (s) => (s.spendToday("USD") + 600 > 1000 ? { refused: true, reason_code: "over_per_day" } : null);
+  l.settle(ok(l.reserve({ group: "spend", op: "pay", key: "K", cents: 600, currency: "USD" }, always)), "unknown");
+  ok(l.reserve({ group: "spend", op: "pay", key: "other", cents: 100, currency: "USD" }, always));
+  assert.equal(l.snapshot().spendToday("USD"), 700);
+  assert.equal(l.snapshot({ replacing: "K" }).spendToday("USD"), 100, "the attempt being retried is left out");
+  assert.equal(l.snapshot({ replacing: "K" }).count("spend", "day"), 1);
+  assert.deepEqual(l.reserve({ group: "spend", op: "pay", key: "K", cents: 600, currency: "USD" }, cap), { refusal: { refused: true, reason_code: "over_per_day" } }, "without replacing it, the retry counts twice");
+  const id = ok(l.reserve({ group: "spend", op: "pay", key: "K", cents: 600, currency: "USD" }, cap, { replacing: "K" }));
+  assert.equal(l.snapshot().spendToday("USD"), 700, "counted once: the new reservation stands for the call");
+  l.settle(id, "done");
+  assert.equal(l.snapshot().spendToday("USD"), 700);
+  assert.equal(l.snapshot().count("spend", "day"), 2);
+});
+
+test("ledger: a rebuild counts an unknown-outcome call and its retry under the same key once", (t) => {
+  const dir = tempDir(t);
+  const clock = manualClock("2026-11-04T12:00:00.000Z");
+  const audit = new AuditLog(dir, "column", { clock });
+  const base = { server: "column", version: "t", guard: "t", session: "s", tool: "column_spend", tier: "spend", group: "spend", mode: "live", dry_run: false, currency: "USD", operation: "pay" };
+  audit.append({ ...base, decision: "unknown_outcome", idempotency_key: "K", amount_cents: 600 });
+  audit.append({ ...base, decision: "executed", idempotency_key: "K", amount_cents: 600 });
+  audit.append({ ...base, decision: "unknown_outcome", idempotency_key: "L", amount_cents: 50 });
+  audit.append({ ...base, decision: "unknown_outcome", idempotency_key: "L", amount_cents: 50 });
+  const s = new Ledger(dir, { clock, audit }).snapshot();
+  assert.equal(s.spendToday("USD"), 650);
+  assert.equal(s.count("spend", "day"), 2);
+});
+
 test("ledger: a rebuild releases what mcp-guard cancel released, and counts a later retry", (t) => {
   const dir = tempDir(t);
   const clock = manualClock("2026-11-04T12:00:00.000Z");

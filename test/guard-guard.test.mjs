@@ -330,6 +330,40 @@ describe("step 5: idempotency and dry_run", () => {
     assert.equal(ok.calls[0].ctx.idempotencyKey, p1.idempotency_key);
   });
 
+  test("a provider-keyed retry of an unknown call counts against the caps once", async (t) => {
+    const policy = { ...ALL_ON, limits: { spend: { ...ALL_ON.limits.spend, per_day: 800 }, rate: { spend_per_day: 1 } } };
+    const { guard } = mk(t, { policy });
+    const boom = stub(() => ({ ok: false, status: 502, error: { message: "bad gateway" }, sent: true }));
+    const p1 = await exec(guard, "payment_create", pay(500), { handler: boom });
+    assert.equal(p1.status, "unknown_outcome");
+    const ok = stub();
+    const p2 = await exec(guard, "payment_create", pay(500), { handler: ok });
+    assert.equal(p2.status, "done", "the retry is the call the caps already count");
+    assert.equal(ok.calls[0].ctx.idempotencyKey, p1.idempotency_key);
+    const s = guard.ledger.snapshot();
+    assert.equal(s.spendToday("USD"), 500, "counted once");
+    assert.equal(s.count("spend", "day"), 1);
+    assert.equal(code(await exec(guard, "payment_create", pay(200, { description: "another" }), { handler: ok })), "rate_limited", "a different call still counts it");
+  });
+
+  test("a retry of an unknown provider-keyed call that is not sent leaves it unknown", async (t) => {
+    const clock = manualClock("2026-11-04T10:00:00.000Z");
+    let n = 0;
+    const flaky = { name: "none", human: false, request: async () => (++n === 2 ? { result: "denied", approver: "none", human: false, reason: "not now" } : { result: "approved", approver: "none", human: false }) };
+    const { guard } = mk(t, { guard: { clock, approvers: { none: flaky } } });
+    const boom = stub(() => ({ ok: false, status: 502, error: { message: "bad gateway" }, sent: true }));
+    const p1 = await exec(guard, "payment_create", pay(), { handler: boom });
+    assert.equal(p1.status, "unknown_outcome");
+    assert.equal(code(await exec(guard, "payment_create", pay(), { handler: boom })), "approval_denied");
+    assert.deepEqual(guard.idempotency.entries().map((e) => e.status), ["unknown"], "the original may still have run");
+    assert.equal(guard.ledger.snapshot().spendToday("USD"), 500, "and it still counts");
+    clock.advance(86_400_000 + 3_600_000); // the next UTC day
+    const ok = stub();
+    const p3 = await exec(guard, "payment_create", pay(), { handler: ok });
+    assert.equal(p3.status, "done");
+    assert.equal(ok.calls[0].ctx.idempotencyKey, p1.idempotency_key, "still sent under the original key, which the provider dedupes on");
+  });
+
   test("outcome classification", async (t) => {
     const { guard } = mk(t);
     const cases = [

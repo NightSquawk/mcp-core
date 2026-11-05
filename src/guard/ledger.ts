@@ -66,6 +66,9 @@ function isLedgerFile(v: unknown): v is LedgerFile {
   return Array.isArray(events) && events.every(isLedgerEvent);
 }
 
+/** An earlier attempt, outcome unknown, of the call a retry under `key` sends again. */
+const replaces = (e: LedgerEvent, key: string | undefined) => key !== undefined && e.key === key && e.status === "unknown";
+
 export interface LedgerSnapshot {
   /** Spend counted today (UTC) in `currency`, from this ledger. */
   spendToday(currency: string): number;
@@ -113,6 +116,9 @@ export class Ledger {
       const status: LedgerStatus | null =
         l.decision === "executed" ? "done" : l.decision === "pending" ? "pending" : l.decision === "unknown_outcome" ? "unknown" : null;
       if (!status) continue;
+      // A retry under the same key (a provider that dedupes on it) is the same call: it replaces an
+      // earlier attempt whose outcome was unknown, as reserve() does when it runs.
+      if (typeof l.idempotency_key === "string") for (const e of events) if (e.key === l.idempotency_key && e.status === "unknown") e.status = "failed";
       events.push({
         id: `audit-${l.hash.slice(7, 19)}`,
         t: Date.parse(l.ts),
@@ -127,10 +133,10 @@ export class Ledger {
     return { version: 1, rebuilt_from_audit: this.#clock().toISOString(), events };
   }
 
-  #snapshot(f: LedgerFile): LedgerSnapshot {
+  #snapshot(f: LedgerFile, replacing?: string): LedgerSnapshot {
     const now = this.#clock();
     const today = utcDay(now);
-    const live = f.events.filter((e) => e.status !== "failed");
+    const live = f.events.filter((e) => e.status !== "failed" && !replaces(e, replacing));
     return {
       spendToday: (currency) =>
         live
@@ -142,23 +148,30 @@ export class Ledger {
     };
   }
 
-  /** A read-only view (dry runs and step 4 checks). */
-  snapshot(): LedgerSnapshot {
-    return this.#snapshot(this.#load());
+  /**
+   * A read-only view (dry runs and step 4 checks). `replacing` is the key of an unknown-outcome call
+   * that this call retries under the same key: the totals leave that attempt out, since the retry is
+   * the same call and is counted in its place.
+   */
+  snapshot(opts: { replacing?: string } = {}): LedgerSnapshot {
+    return this.#snapshot(this.#load(), opts.replacing);
   }
 
   /**
    * Check and reserve atomically (step 8 re-check): `check` sees the totals under
-   * the lock; when it returns null the event is recorded as `reserved`.
+   * the lock; when it returns null the event is recorded as `reserved`. With
+   * `replacing`, the unknown-outcome attempts under that key are left out of the
+   * check and marked failed: the new reservation counts for the call instead.
    */
-  reserve<R>(event: Omit<LedgerEvent, "id" | "t" | "status">, check: (s: LedgerSnapshot) => R | null): { refusal: R } | { id: string } {
+  reserve<R>(event: Omit<LedgerEvent, "id" | "t" | "status">, check: (s: LedgerSnapshot) => R | null, opts: { replacing?: string } = {}): { refusal: R } | { id: string } {
     return withFileLock(this.#lock, () => {
       const f = this.#load();
-      const refusal = check(this.#snapshot(f));
+      const refusal = check(this.#snapshot(f, opts.replacing));
       if (refusal !== null) return { refusal };
       const id = nonce();
       const now = this.#clock().getTime();
       f.events = f.events.filter((e) => now - e.t < KEEP_MS);
+      for (const e of f.events) if (replaces(e, opts.replacing)) e.status = "failed";
       f.events.push({ ...event, id, t: now, status: "reserved" });
       writeJsonFile(this.file, f);
       return { id };

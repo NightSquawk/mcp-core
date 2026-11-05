@@ -693,6 +693,30 @@ export class Guard<P extends BasePolicy = BasePolicy> {
       }
     }
 
+    // The idempotency entry (step 5) is looked up before the limits: a provider-keyed retry of a call
+    // whose outcome is unknown is that call sent again under its key, so the limits count it once.
+    const canonicalBody = canonicalJson({ path: request.pathParams ?? {}, query: request.query ?? {}, body: request.body ?? null });
+    const requestHash = `sha256:${sha256Hex(canonicalBody)}`;
+    base.request_hash = requestHash;
+    const now = this.#clock();
+    const today = utcDay(now);
+    const maxLength = this.#opts.idempotencyMaxLength ?? 255;
+    const windowMs = this.#opts.idempotencyWindowMs ?? 10 * 60_000;
+    const keyFor = (day: string) => deriveKey({ server: this.server, operation: op.operationId, canonicalBody, proposalDay: day, maxLength });
+    const keyToday = keyFor(today);
+    // The key of today and of every earlier day the store still holds, newest first. A call whose
+    // outcome is unknown, or that the provider holds, blocks an identical retry (or lends it its
+    // key) until it is resolved or pruned, not only until the next UTC day. A done call matches
+    // inside the window; where the provider takes an idempotency key, it matches for as long as the
+    // store keeps it, so a retry after midnight is never sent again under a new key.
+    let existing: IdemEntry | null;
+    try {
+      existing = this.idempotency.lookup(retainedDays(now).map(keyFor), op.idempotencyKey ? {} : { windowMs });
+    } catch (e) {
+      return this.#refused(base, this.#stateRefusal(e));
+    }
+    const replacing = existing && existing.status === "unknown" && op.idempotencyKey ? existing.key : undefined;
+
     let providerToday: number | null = null;
     if (group === "spend") {
       const amount = extraction.amount_cents;
@@ -709,10 +733,10 @@ export class Guard<P extends BasePolicy = BasePolicy> {
           return this.#refused(base, refuse("provider_totals_unavailable", `Could not read today's total from the provider (${this.redact(String((e as Error)?.message ?? e))}), so the daily cap cannot be checked.`));
         }
       }
-      const r = this.#spendRefusal(amount, limits.currency, this.ledger.snapshot(), providerToday);
+      const r = this.#spendRefusal(amount, limits.currency, this.ledger.snapshot({ replacing }), providerToday);
       if (r) return this.#refused(base, r);
     }
-    const rate = this.#rateRefusal(group, this.ledger.snapshot());
+    const rate = this.#rateRefusal(group, this.ledger.snapshot({ replacing }));
     if (rate) return this.#refused(base, rate);
 
     const chosen = selectApprover(approverFor(this.policy, group), extraction.amount_cents);
@@ -746,27 +770,8 @@ export class Guard<P extends BasePolicy = BasePolicy> {
       }
     }
 
-    // 5. Idempotency (before approval, so a retry never asks twice).
-    const canonicalBody = canonicalJson({ path: request.pathParams ?? {}, query: request.query ?? {}, body: request.body ?? null });
-    const requestHash = `sha256:${sha256Hex(canonicalBody)}`;
-    base.request_hash = requestHash;
-    const now = this.#clock();
-    const today = utcDay(now);
-    const maxLength = this.#opts.idempotencyMaxLength ?? 255;
-    const windowMs = this.#opts.idempotencyWindowMs ?? 10 * 60_000;
-    const keyFor = (day: string) => deriveKey({ server: this.server, operation: op.operationId, canonicalBody, proposalDay: day, maxLength });
-    const keyToday = keyFor(today);
-    // The key of today and of every earlier day the store still holds, newest first. A call whose
-    // outcome is unknown, or that the provider holds, blocks an identical retry (or lends it its
-    // key) until it is resolved or pruned, not only until the next UTC day. A done call matches
-    // inside the window; where the provider takes an idempotency key, it matches for as long as the
-    // store keeps it, so a retry after midnight is never sent again under a new key.
-    let existing: IdemEntry | null;
-    try {
-      existing = this.idempotency.lookup(retainedDays(now).map(keyFor), op.idempotencyKey ? {} : { windowMs });
-    } catch (e) {
-      return this.#refused(base, this.#stateRefusal(e));
-    }
+    // 5. Idempotency (before approval, so a retry never asks twice). The entry was looked up
+    // before the limits, above.
     const key = existing && existing.status === "unknown" ? existing.key : keyToday;
     base.idempotency_key = key;
 
@@ -864,7 +869,10 @@ export class Guard<P extends BasePolicy = BasePolicy> {
         return this.#refused(base, refuse("outcome_unknown", `An identical request at ${e.created_at} has an unknown outcome.`));
       }
     }
-    const release = () => void this.#finish(key, "failed");
+    // A call not sent after all is failed, so the same request may run again; but a retry that
+    // reclaimed an unknown outcome leaves it unknown, since the original may still have run.
+    const unsent = existing && existing.status === "unknown" ? "unknown" : "failed";
+    const release = () => void this.#finish(key, unsent);
 
     // 6. Approval.
     const proposal = buildProposal({ server: this.server, operation: op, group, mode: this.mode, extraction, client, requestHash, idempotencyKey: key, policyHash: this.loaded.hash, reason: input.reason, now });
@@ -938,7 +946,8 @@ export class Guard<P extends BasePolicy = BasePolicy> {
     try {
       reservation = this.ledger.reserve(
         { group, op: op.operationId, key, ...(typeof extraction.amount_cents === "number" ? { cents: extraction.amount_cents } : {}), ...(extraction.currency ? { currency: extraction.currency } : {}) },
-        (s) => (group === "spend" ? this.#spendRefusal(extraction.amount_cents as number, extraction.currency as string, s, providerToday) : null) ?? this.#rateRefusal(group, s)
+        (s) => (group === "spend" ? this.#spendRefusal(extraction.amount_cents as number, extraction.currency as string, s, providerToday) : null) ?? this.#rateRefusal(group, s),
+        { replacing }
       );
     } catch (e) {
       release();
@@ -952,12 +961,12 @@ export class Guard<P extends BasePolicy = BasePolicy> {
     // time after the approval: a proposal that expired meanwhile approves nothing either.
     if (!(this.#clock().getTime() <= Date.parse(proposal.expires_at))) {
       release();
-      this.#settle(reservation.id, "failed");
+      this.#settle(reservation.id, unsent);
       return this.#refused(base, refuse("approval_expired", `The proposal expired at ${proposal.expires_at} before the call could be sent. Nothing was sent; ask again.`));
     }
     if (this.policy.client_scope?.lock_per_session && client !== null && !this.session.lockClient(client)) {
       release();
-      this.#settle(reservation.id, "failed");
+      this.#settle(reservation.id, unsent);
       return this.#refused(base, refuse("client_locked", `This session is pinned to ${this.session.lockedClient}.`));
     }
 
