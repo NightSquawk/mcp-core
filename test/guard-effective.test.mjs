@@ -128,6 +128,13 @@ describe("computeEffective", () => {
     assert.equal(eff(t, { policy: { ...ALL_ON, approval: { ...ALL_ON.approval, spend: "external", fatigue: {} } } }).groups.spend.enabled, true, "an empty fatigue block sets no limit");
   });
 
+  test("a remote kill flag fails closed until G5", (t) => {
+    const remote = eff(t, { policy: { ...ALL_ON, kill_switch: { remote_flag: "https://example.test/flag" } } });
+    assert.deepEqual(codes(remote), { read: "on", change: "remote_kill_flag_unavailable", critical: "remote_kill_flag_unavailable", spend: "remote_kill_flag_unavailable" });
+    assert.match(remote.groups.change.reason, /^kill_switch\.remote_flag arrives with G5/);
+    assert.equal(eff(t, { policy: { ...ALL_ON, kill_switch: { remote_flag: "none" } } }).groups.change.enabled, true);
+  });
+
   test("tiers_off and sandbox-only tiers", (t) => {
     const e = eff(t, { policy: { ...ALL_ON, tiers_off: ["reducing", "write"] }, mode: "none" });
     assert.equal(e.groups.change.reason_code, "tiers_off");

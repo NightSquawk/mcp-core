@@ -182,6 +182,12 @@ export function computeEffective<P extends BasePolicy>(input: EffectiveInput<P>)
       state = off("approval_feature_unavailable", `quorum, independent and delay (section 6.6) arrive with G4a; the ${group} group stays off rather than run without them.`);
     } else if (HIGH_RISK_GROUPS.includes(group) && policy.approval.delay_new_target) {
       state = off("approval_feature_unavailable", `approval.delay_new_target arrives with G4a; the ${group} group stays off rather than run without it.`);
+    } else if (group !== "read" && (policy.kill_switch?.remote_flag ?? "none") !== "none") {
+      state = off(
+        "remote_kill_flag_unavailable",
+        `kill_switch.remote_flag arrives with G5, so this version cannot see a remote stop; the ${group} group stays off rather than run without it.`,
+        `Set kill_switch.remote_flag to "none" in ${loaded.path} (admin rights) to run ${group} without a remote flag.`
+      );
     } else if (group !== "read" && HUMAN_APPROVERS.includes(cfg.approver) && fatigueLimits(policy).length) {
       state = off(
         "approval_feature_unavailable",

@@ -128,6 +128,7 @@ export const basePolicyShape = {
     .strict()
     .optional(),
   operators: z.record(z.string().min(1)).optional(),
+  // Anything but "none" keeps every non-read group off until G5 reads the flag (effective.ts).
   kill_switch: z.object({ remote_flag: z.string().default("none") }).strict().optional(),
   taint: taintSchema.default({}),
   canaries: canariesSchema.default({}),
