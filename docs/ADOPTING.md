@@ -51,7 +51,9 @@ by what the call can do, not by its HTTP method. A non-GET read needs a `read_re
     `hooks.external`;
   - `idempotencyWindowMs` (default 10 minutes) is how long an identical call returns the first
     call's result when the provider takes no idempotency key. Shorten it where repeating a call is
-    normal, such as starting a machine, stopping it and starting it again.
+    normal, such as starting a machine, stopping it and starting it again. When the provider takes
+    one (`idempotencyKey`), an identical call returns the first call's result for three days, the
+    time the guard keeps it; a genuine repeat must differ in a body field, such as the description.
 - **Catalog servers:** `registerCatalogGroups(server, { guard, operations, resolve, handler, extract, ... })`
   registers list/describe plus one tool per group (`<prefix>_read`, `<prefix>_change`, ...). It
   also registers `guard://manifest` and `guard://status`.

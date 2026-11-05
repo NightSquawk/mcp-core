@@ -756,15 +756,14 @@ export class Guard<P extends BasePolicy = BasePolicy> {
     const windowMs = this.#opts.idempotencyWindowMs ?? 10 * 60_000;
     const keyFor = (day: string) => deriveKey({ server: this.server, operation: op.operationId, canonicalBody, proposalDay: day, maxLength });
     const keyToday = keyFor(today);
-    // Today's key, then the key of every earlier day the store still holds (newest first): a call
-    // whose outcome is unknown, or that the provider holds, blocks an identical retry (or lends it
-    // its key) until it is resolved or pruned, not only until the next UTC day. A done call from an
-    // earlier day matches only inside the window, which covers a retry just after midnight.
+    // The key of today and of every earlier day the store still holds, newest first. A call whose
+    // outcome is unknown, or that the provider holds, blocks an identical retry (or lends it its
+    // key) until it is resolved or pruned, not only until the next UTC day. A done call matches
+    // inside the window; where the provider takes an idempotency key, it matches for as long as the
+    // store keeps it, so a retry after midnight is never sent again under a new key.
     let existing: IdemEntry | null;
     try {
-      existing =
-        this.idempotency.lookup([keyToday], op.idempotencyKey ? {} : { windowMs }) ??
-        this.idempotency.lookup(retainedDays(now).filter((d) => d !== today).map(keyFor), { windowMs });
+      existing = this.idempotency.lookup(retainedDays(now).map(keyFor), op.idempotencyKey ? {} : { windowMs });
     } catch (e) {
       return this.#refused(base, this.#stateRefusal(e));
     }

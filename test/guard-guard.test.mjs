@@ -448,6 +448,20 @@ describe("step 5: idempotency and dry_run", () => {
     assert.equal(asked, 1);
   });
 
+  test("a provider-keyed call done before midnight is not sent again after it", async (t) => {
+    const clock = manualClock("2026-11-04T23:55:00.000Z");
+    const { guard } = mk(t, { guard: { clock } });
+    const h = stub();
+    assert.equal((await exec(guard, "payment_create", pay(), { handler: h })).status, "done");
+    clock.advance(20 * 60_000); // 2026-11-05T00:15Z: a new UTC day, and past the ten-minute window
+    const again = await exec(guard, "payment_create", pay(), { handler: h });
+    assert.equal(again.status, "deduplicated");
+    assert.equal(h.calls.length, 1, "not sent again under a key derived from the new day");
+    clock.advance(3 * 86_400_000); // past the three days the store keeps it: a new call
+    assert.equal((await exec(guard, "payment_create", pay(), { handler: h })).status, "done");
+    assert.equal(h.calls.length, 2);
+  });
+
   test("yesterday's key still matches just after midnight", async (t) => {
     const clock = manualClock("2026-11-04T23:59:30.000Z");
     const { guard } = mk(t, { guard: { clock } });
