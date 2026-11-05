@@ -1,6 +1,6 @@
 // The enforcement path (section 6): steps 0-9, dry_run, idempotency, approval, outcomes, audit, read path.
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 import { canaryHash, createGuard, LockTimeoutError, PROPOSAL_TTL_MS, refuse, renderExecute, renderRead, staticProtection, TIER_GROUP } from "../dist/guard/index.js";
@@ -880,6 +880,16 @@ describe("step 9: audit", () => {
     const again = createGuard({ server: "toy", version: "1.0.0", env: sb.env, mode: "sandbox", protection: staticProtection(true, sb.policyPath), stateDir: sb.stateDir, log: () => {} });
     assert.ok(again.kill.stopped("change"));
     assert.ok(again.warnings.some((w) => /Audit chain broken/.test(w)));
+  });
+
+  test("an audit line that is JSON but not an audit line trips the kill switch at startup instead of failing it", async (t) => {
+    const { guard, sb } = mk(t);
+    await exec(guard, "thing_create", { body: { a: 1 } });
+    const file = guard.audit.files()[0];
+    appendFileSync(file, "null\n");
+    const again = createGuard({ server: "toy", version: "1.0.0", env: sb.env, mode: "sandbox", protection: staticProtection(true, sb.policyPath), stateDir: sb.stateDir, log: () => {} });
+    assert.ok(again.kill.stopped("change"));
+    assert.ok(again.warnings.some((w) => w.includes("Audit chain broken") && w.includes("at line 2 (not an audit line)")));
   });
 
   test("a broken chain in an older month's file trips it too, not only the last two", async (t) => {

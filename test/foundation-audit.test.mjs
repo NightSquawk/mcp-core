@@ -94,6 +94,26 @@ test("audit: verify finds edits, deletions, reordering, insertions and forged li
   assert.equal(new A.AuditLog(dir, "proxmox").verify(file).brokenAt, 1, "or claimed by another server");
 });
 
+test("audit: verify reports JSON that is not an audit line, and a line too deep to hash, where it breaks; it never throws", (t) => {
+  const { log, file } = logWith(t, 2);
+  const original = linesOf(file);
+  const check = (mutated) => {
+    writeFileSync(file, mutated.join("\n") + "\n");
+    return log.verify(file);
+  };
+  for (const bad of ["null", "5", '"text"', "true", "[1,2]", "{}", '{"prev":7,"hash":"sha256:0"}', `{"prev":${JSON.stringify(JSON.parse(original[0]).hash)}}`]) {
+    assert.deepEqual(check([original[0], bad, original[1]]), { file, ok: false, lines: 3, brokenAt: 2, reason: "not an audit line" }, bad);
+  }
+  assert.deepEqual(check(["null"]), { file, ok: false, lines: 1, brokenAt: 1, reason: "not an audit line" });
+  assert.equal(log.verifyAll()[0].ok, false);
+  // JSON.parse takes any depth, hashing does not: a line with the right prev, nested too deeply to hash.
+  const depth = 100_000;
+  const deep = `{"prev":${JSON.stringify(JSON.parse(original[0]).hash)},"x":${"[".repeat(depth)}${"]".repeat(depth)},"hash":"sha256:0"}`;
+  assert.deepEqual(check([original[0], deep]), { file, ok: false, lines: 2, brokenAt: 2, reason: "not an audit line" });
+  writeFileSync(file, original.join("\n") + "\n");
+  assert.equal(log.verify(file).ok, true);
+});
+
 test("audit: known limit, a cut tail still verifies (G5 forwards lines off-box)", (t) => {
   const { log, file } = logWith(t, 4);
   writeFileSync(file, linesOf(file).slice(0, 2).join("\n") + "\n");

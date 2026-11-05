@@ -67,7 +67,8 @@ test("a broken audit chain fails", async (t) => {
   assert.match(good.json.checks.find((c) => c.id === "audit").message, /1 file, 2 lines, chain intact/);
 
   const file = log.files()[0];
-  const lines = readFileSync(file, "utf8").split("\n");
+  const intact = readFileSync(file, "utf8");
+  const lines = intact.split("\n");
   lines.splice(0, 1); // drop the first line
   writeFileSync(file, lines.join("\n"));
   const r = await cli(["verify", "column", "--json"], { env: sb.env, cwd: sb.base });
@@ -75,6 +76,14 @@ test("a broken audit chain fails", async (t) => {
   const audit = r.json.checks.find((c) => c.id === "audit");
   assert.equal(audit.level, "fail");
   assert.match(audit.message, /1 broken chain: the server trips its kill switch at start/);
+
+  // A line that is JSON but not an audit line is named, not a crash.
+  writeFileSync(file, intact + "null\n");
+  const nul = await cli(["verify", "column", "--json"], { env: sb.env, cwd: sb.base });
+  assert.equal(nul.code, 1);
+  const named = nul.json.checks.find((c) => c.id === "audit");
+  assert.equal(named.level, "fail");
+  assert.deepEqual(named.detail, [`${file}: line 3 (not an audit line)`]);
 });
 
 test("unreadable kill or idempotency state fails; an unknown outcome warns", async (t) => {

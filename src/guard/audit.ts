@@ -146,22 +146,37 @@ export class AuditLog {
       .map((f) => join(this.dir, f));
   }
 
-  /** Verify one file's chain. */
+  /**
+   * Verify one file's chain. Whatever a line holds, a damaged one is reported as the place the
+   * chain breaks, never thrown: the guard trips its kill switch on it at start, and mcp-guard
+   * verify and reset name it.
+   */
   verify(file: string): ChainCheck {
     const month = /audit-(\d{4}-\d{2})\.jsonl$/.exec(file)?.[1] ?? "";
     if (!existsSync(file)) return { file, ok: true, lines: 0 };
     const lines = readFileSync(file, "utf8").split("\n").filter((l) => l.trim());
+    const broken = (i: number, reason: string): ChainCheck => ({ file, ok: false, lines: lines.length, brokenAt: i + 1, reason });
     let prev = genesis(this.server, month);
     for (let i = 0; i < lines.length; i++) {
-      let parsed: AuditLine;
+      let parsed: unknown;
       try {
-        parsed = JSON.parse(lines[i]) as AuditLine;
+        parsed = JSON.parse(lines[i]);
       } catch {
-        return { file, ok: false, lines: lines.length, brokenAt: i + 1, reason: "not JSON" };
+        return broken(i, "not JSON");
       }
-      const { hash, ...rest } = parsed;
-      if (rest.prev !== prev) return { file, ok: false, lines: lines.length, brokenAt: i + 1, reason: "prev does not match the line before" };
-      if (lineHash(prev, rest) !== hash) return { file, ok: false, lines: lines.length, brokenAt: i + 1, reason: "hash does not match the line" };
+      // JSON, but not a line this log writes: null, a number, an array, or no chain fields.
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return broken(i, "not an audit line");
+      const { hash, ...rest } = parsed as Record<string, unknown>;
+      if (typeof hash !== "string" || typeof rest.prev !== "string") return broken(i, "not an audit line");
+      if (rest.prev !== prev) return broken(i, "prev does not match the line before");
+      let expected: string;
+      try {
+        expected = lineHash(prev, rest as unknown as Omit<AuditLine, "hash">);
+      } catch {
+        // JSON.parse takes any depth, hashing does not: a line nested too deeply to hash.
+        return broken(i, "not an audit line");
+      }
+      if (expected !== hash) return broken(i, "hash does not match the line");
       prev = hash;
     }
     return { file, ok: true, lines: lines.length };
