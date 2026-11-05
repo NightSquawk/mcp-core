@@ -42,13 +42,13 @@ export function tokensOf(text: string): string[] {
   return [...out];
 }
 
-/** Normalize one target value the same way tokensOf normalizes text. */
+/**
+ * The tokens of one target value, found exactly as tokensOf finds them in text, so a value matches
+ * however the text spelled it: "Evil Corp" is "evil" and "corp", and "1234 5678" is "1234", "5678"
+ * and "12345678".
+ */
 export function normalizeValue(value: string): string[] {
-  const v = value.trim().toLowerCase();
-  const digits = v.replace(/\D/g, "");
-  const out = [v];
-  if (/^[\d \t.-]+$/.test(v) && digits.length >= MIN_TOKEN) out.push(digits);
-  return out;
+  return tokensOf(value);
 }
 
 /** Every string and number leaf of a value, skipping labelled untrusted fields. */
@@ -118,14 +118,23 @@ export class SessionState {
     }
   }
 
-  /** Where a value first appeared, if that was untrusted text; null otherwise. */
-  untrustedSource(value: string): string | null {
-    for (const v of normalizeValue(value)) {
-      if (this.#trusted.has(v)) continue;
-      const src = this.#untrusted.get(v);
-      if (src) return src;
+  /**
+   * A token of a value that first appeared in untrusted text, and where; null if there is none.
+   * One is enough: a payee "Evil Corp" taken from an email is refused even when "corp" also
+   * appeared in a structured field, because "evil" did not.
+   */
+  untrustedToken(value: string): { token: string; source: string } | null {
+    for (const token of normalizeValue(value)) {
+      if (this.#trusted.has(token)) continue;
+      const source = this.#untrusted.get(token);
+      if (source) return { token, source };
     }
     return null;
+  }
+
+  /** Where a value, or a word or number in it, first appeared, if that was untrusted text; null otherwise. */
+  untrustedSource(value: string): string | null {
+    return this.untrustedToken(value)?.source ?? null;
   }
 
   /** Pin non-read calls to one client (7.11). Returns false if another client is already pinned. */

@@ -682,9 +682,11 @@ export class Guard<P extends BasePolicy = BasePolicy> {
     }
     if (highRisk) {
       for (const t of targets) {
-        const src = this.session.untrustedSource(t.value);
-        if (src) {
-          return this.#refused(base, refuse("untrusted_target", `${t.kind} ${t.value} first appeared in text other people wrote (${src}) this session. A payee or security change taken from such text is refused.`, {
+        const hit = this.session.untrustedToken(t.value);
+        if (hit) {
+          // Name the word or number that matched when it is only part of the value.
+          const what = hit.token === t.value.trim().toLowerCase() ? `${t.kind} ${t.value}` : `${t.kind} ${t.value}: "${hit.token}"`;
+          return this.#refused(base, refuse("untrusted_target", `${what} first appeared in text other people wrote (${hit.source}) this session. A payee or security change taken from such text is refused.`, {
             how_to_enable: "Have the human confirm the value and run the call in a new session.",
           }));
         }
