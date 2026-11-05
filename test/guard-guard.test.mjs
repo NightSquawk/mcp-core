@@ -561,6 +561,15 @@ describe("step 6: approval", () => {
     assert.equal(d.preview.approval.approver, "deny");
   });
 
+  test("approval.fatigue fails closed for a call whose threshold approver asks a person", async (t) => {
+    const spend = { approver: "none", tiers: [{ over_cents: 1000, approver: "external" }] };
+    const { guard } = mk(t, { policy: { ...ALL_ON, approval: { ...ALL_ON.approval, spend, fatigue: { pushes_per_hour: 6 } } } });
+    assert.equal(code(await exec(guard, "payment_create", pay(500))), "done", "under the threshold no one is asked");
+    const r = await exec(guard, "payment_create", pay(2000));
+    assert.equal(code(r), "approval_feature_unavailable");
+    assert.match(r.refusal.message, /approver "external" asks a person, and approval\.fatigue \(pushes_per_hour, section 6\.7\) arrives with G4a/);
+  });
+
   test("approval text is core-written; the model's reason is last, cut and sanitized", async (t) => {
     const seen = [];
     const spy = { name: "none", human: false, request: async (p, text) => (seen.push(text), { result: "approved", approver: "none", human: false }) };

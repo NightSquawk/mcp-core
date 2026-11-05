@@ -4,7 +4,7 @@
  * is off here is not registered, so the model never sees its tool.
  */
 import type { Mode } from "./approvers.js";
-import { approverFor, IMPLEMENTED_APPROVERS, type BasePolicy, type LoadedPolicy } from "./policy.js";
+import { approverFor, fatigueLimits, HUMAN_APPROVERS, IMPLEMENTED_APPROVERS, type BasePolicy, type LoadedPolicy } from "./policy.js";
 import type { ProtectionReport } from "./protection.js";
 import { DEFAULT_GROUPS, GROUPS, GROUP_TIERS, HIGH_RISK_GROUPS, type Group, type Tier } from "./tiers.js";
 
@@ -182,6 +182,12 @@ export function computeEffective<P extends BasePolicy>(input: EffectiveInput<P>)
       state = off("approval_feature_unavailable", `quorum, independent and delay (section 6.6) arrive with G4a; the ${group} group stays off rather than run without them.`);
     } else if (HIGH_RISK_GROUPS.includes(group) && policy.approval.delay_new_target) {
       state = off("approval_feature_unavailable", `approval.delay_new_target arrives with G4a; the ${group} group stays off rather than run without it.`);
+    } else if (group !== "read" && HUMAN_APPROVERS.includes(cfg.approver) && fatigueLimits(policy).length) {
+      state = off(
+        "approval_feature_unavailable",
+        `approval.fatigue (${fatigueLimits(policy).join(", ")}) arrives with G4a; the ${group} group's approver "${cfg.approver}" asks a person, so the group stays off rather than run without it.`,
+        `Remove approval.fatigue from ${loaded.path} (admin rights) to run ${group} without those limits.`
+      );
     }
     // 9. Nothing left to run.
     else if (!tiers.length) {

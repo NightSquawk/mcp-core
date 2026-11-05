@@ -14,6 +14,8 @@ export const APPROVER_NAMES = ["none", "deny", "external", "duo", "passkey", "au
 export type ApproverName = (typeof APPROVER_NAMES)[number];
 /** Approvers this version implements (G1). Any other name fails closed. */
 export const IMPLEMENTED_APPROVERS: readonly ApproverName[] = Object.freeze(["none", "deny", "external"]);
+/** Approvers that put the call in front of a person, which approval.fatigue (6.7) limits. */
+export const HUMAN_APPROVERS: readonly ApproverName[] = Object.freeze(["external", "duo", "passkey", "auth0-ciba"]);
 
 const DURATION = /^(\d+)(ms|s|m|h|d)$/;
 export const durationSchema = z.string().regex(DURATION, 'a duration such as "30m", "4h" or "1d"');
@@ -218,6 +220,16 @@ export function approverFor(policy: BasePolicy, group: Group): z.infer<typeof ap
   const cfg = policy.approval[group];
   if (cfg === undefined) return { approver: "none" };
   return typeof cfg === "string" ? { approver: cfg } : cfg;
+}
+
+/**
+ * The approval.fatigue limits a policy sets (6.7). This version enforces none of them, so a call
+ * whose approver asks a person fails closed while any is set (G4a enforces them).
+ */
+export function fatigueLimits(policy: BasePolicy): string[] {
+  return Object.entries(policy.approval.fatigue ?? {})
+    .filter(([, v]) => v !== undefined)
+    .map(([k]) => k);
 }
 
 /** Every approver name a group's config can resolve to (thresholds included). */

@@ -29,7 +29,7 @@ import { KillSwitch, type KillState } from "./kill-switch.js";
 import { Ledger, type LedgerSnapshot, type LedgerStatus } from "./ledger.js";
 import { buildManifest, type GuardManifest } from "./manifest.js";
 import { killMarkers, stateDir as defaultStateDir, assertServerName } from "./paths.js";
-import { approverFor, basePolicySchema, loadPolicy, type ApproverName, type BasePolicy, type LoadedPolicy } from "./policy.js";
+import { approverFor, basePolicySchema, fatigueLimits, loadPolicy, type ApproverName, type BasePolicy, type LoadedPolicy } from "./policy.js";
 import { checkProtection, type ProtectionProbes, type ProtectionReport } from "./protection.js";
 import { createRedactor, isBuiltInCredentialName, redactSensitiveKeys, redactValue, type RedactRule, type Redactor } from "./redact.js";
 import { isRefusal, refuse, type Refusal } from "./refusal.js";
@@ -720,6 +720,11 @@ export class Guard<P extends BasePolicy = BasePolicy> {
     if (!approver) return this.#refused(base, refuse("approver_unavailable", `This call needs approver "${chosen.approver}"${chosen.threshold !== undefined ? ` (over ${chosen.threshold} cents)` : ""}, which this version cannot run.`));
     if ((chosen.quorum ?? 1) > 1 || chosen.independent || chosen.delay) {
       return this.#refused(base, refuse("approval_feature_unavailable", "This amount needs quorum, independence or a delay (section 6.6), which arrive with G4a."));
+    }
+    // A threshold can pick an approver that asks a person in a group whose own approver does not.
+    const fatigue = fatigueLimits(this.policy);
+    if (approver.human && fatigue.length) {
+      return this.#refused(base, refuse("approval_feature_unavailable", `This call's approver "${approver.name}" asks a person, and approval.fatigue (${fatigue.join(", ")}, section 6.7) arrives with G4a.`));
     }
     base.approver = approver.name;
     // `external` means the provider holds the call for a human. Without a hook that can

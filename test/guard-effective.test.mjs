@@ -122,6 +122,10 @@ describe("computeEffective", () => {
     assert.equal(eff(t, { policy: { ...ALL_ON, approval: { ...ALL_ON.approval, spend: { approver: "none", quorum: 2 } } } }).groups.spend.reason_code, "approval_feature_unavailable");
     const delayed = eff(t, { policy: { ...ALL_ON, approval: { ...ALL_ON.approval, delay_new_target: "24h" } } });
     assert.deepEqual(codes(delayed), { read: "on", change: "on", critical: "approval_feature_unavailable", spend: "approval_feature_unavailable" });
+    const tired = eff(t, { policy: { ...ALL_ON, approval: { ...ALL_ON.approval, spend: "external", fatigue: { pending_per_server: 1 } } } });
+    assert.deepEqual(codes(tired), { read: "on", change: "on", critical: "on", spend: "approval_feature_unavailable" }, "only a group whose approver asks a person");
+    assert.match(tired.groups.spend.reason, /^approval\.fatigue \(pending_per_server\) arrives with G4a; the spend group's approver "external" asks a person/);
+    assert.equal(eff(t, { policy: { ...ALL_ON, approval: { ...ALL_ON.approval, spend: "external", fatigue: {} } } }).groups.spend.enabled, true, "an empty fatigue block sets no limit");
   });
 
   test("tiers_off and sandbox-only tiers", (t) => {
