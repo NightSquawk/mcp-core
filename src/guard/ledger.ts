@@ -1,14 +1,15 @@
 /**
  * Rolling per-day totals and rate counters (section 7.2). Advisory: rebuilt from
- * the audit log if missing, and cross-checked with the server's providerTotals()
- * for spend caps. Shared by every session on the machine (file + lock).
+ * the audit log when it is missing, corrupt or not a ledger, and cross-checked
+ * with the server's providerTotals() for spend caps. Shared by every session on
+ * the machine (file + lock).
  */
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { AuditLog } from "./audit.js";
 import { nonce, utcDay } from "./canonical.js";
 import { readJsonFile, withFileLock, writeJsonFile } from "./lock.js";
-import type { Group } from "./tiers.js";
+import { GROUPS, type Group } from "./tiers.js";
 
 export type LedgerStatus = "reserved" | "done" | "pending" | "unknown" | "failed";
 
@@ -36,6 +37,34 @@ export const CANCEL_ALERT = "cli_cancel";
 /** Reservations a call that did not finish still holds. */
 const OPEN: ReadonlySet<LedgerStatus> = new Set(["reserved", "pending", "unknown"]);
 const WINDOW_MS = { minute: 60_000, hour: 3_600_000 } as const;
+const STATUSES: ReadonlySet<unknown> = new Set<LedgerStatus>(["reserved", "done", "pending", "unknown", "failed"]);
+const GROUP_NAMES: ReadonlySet<unknown> = new Set<Group>(GROUPS);
+
+const optional = (v: unknown, ok: (x: unknown) => boolean) => v === undefined || ok(v);
+const isText = (v: unknown) => typeof v === "string";
+const isNumber = (v: unknown) => typeof v === "number" && Number.isFinite(v);
+
+function isLedgerEvent(v: unknown): v is LedgerEvent {
+  if (typeof v !== "object" || v === null) return false;
+  const e = v as Record<string, unknown>;
+  return (
+    isText(e.id) &&
+    isNumber(e.t) &&
+    GROUP_NAMES.has(e.group) &&
+    isText(e.op) &&
+    STATUSES.has(e.status) &&
+    optional(e.key, isText) &&
+    optional(e.cents, isNumber) &&
+    optional(e.currency, isText)
+  );
+}
+
+/** A ledger file whose every event has the fields the counts read, each of the right type. */
+function isLedgerFile(v: unknown): v is LedgerFile {
+  if (typeof v !== "object" || v === null) return false;
+  const events = (v as { events?: unknown }).events;
+  return Array.isArray(events) && events.every(isLedgerEvent);
+}
 
 export interface LedgerSnapshot {
   /** Spend counted today (UTC) in `currency`, from this ledger. */
@@ -59,12 +88,16 @@ export class Ledger {
 
   #load(): LedgerFile {
     if (!existsSync(this.file) && this.#audit) return this.#rebuild();
+    let f: unknown = null;
     try {
-      const f = readJsonFile<LedgerFile>(this.file, { version: 1, events: [] });
-      return Array.isArray(f.events) ? f : { version: 1, events: [] };
+      f = readJsonFile<unknown>(this.file, { version: 1, events: [] });
     } catch {
-      return this.#audit ? this.#rebuild() : { version: 1, events: [] };
+      // corrupt JSON: rebuilt below
     }
+    if (isLedgerFile(f)) return f;
+    // Corrupt, or JSON that is not a ledger ({} after a bad repair, an event with a misspelt group):
+    // read as empty, it would count no calls and no spend. The audit log holds them all.
+    return this.#audit ? this.#rebuild() : { version: 1, events: [] };
   }
 
   /** Rebuild from the audit log: every executed, pending or unknown-outcome call, less the ones mcp-guard cancel released. */

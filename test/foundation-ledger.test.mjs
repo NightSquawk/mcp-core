@@ -126,8 +126,29 @@ test("ledger: a corrupt ledger file is rebuilt from the audit log", (t) => {
   const l = new Ledger(dir, { clock, audit });
   writeFileSync(l.file, "{not json");
   assert.equal(l.snapshot().spendToday("USD"), 2000);
-  writeFileSync(l.file, JSON.stringify({ version: 1, events: "nope" }));
-  assert.equal(l.snapshot().spendToday("USD"), 0, "a well-formed file with a bad shape is read as empty (advisory; providerTotals backs the cap)");
+  // Valid JSON that is not a ledger is rebuilt too: read as empty, it would count nothing against the caps.
+  const event = { id: "e", t: Date.parse("2026-11-04T11:00:00.000Z"), group: "spend", op: "pay", cents: 5, currency: "USD", status: "done" };
+  const bad = [
+    {},
+    null,
+    [],
+    { version: 1, events: "nope" },
+    { version: 1, events: [{ ...event, group: "Spend" }] },
+    { version: 1, events: [{ ...event, status: "settled" }] },
+    { version: 1, events: [{ ...event, t: "2026-11-04T11:00:00.000Z" }] },
+    { version: 1, events: [{ ...event, cents: "5" }] },
+    { version: 1, events: [event, null] },
+  ];
+  for (const shape of bad) {
+    writeFileSync(l.file, JSON.stringify(shape));
+    assert.equal(l.snapshot().spendToday("USD"), 2000, JSON.stringify(shape));
+    assert.equal(l.snapshot().count("spend", "day"), 5, JSON.stringify(shape));
+  }
+  writeFileSync(l.file, JSON.stringify({ version: 1, events: [event] }));
+  assert.equal(l.snapshot().spendToday("USD"), 5, "a ledger with the right shape is read as it is");
+  const noAudit = new Ledger(dir, { clock });
+  writeFileSync(noAudit.file, "{}");
+  assert.equal(noAudit.snapshot().spendToday("USD"), 0, "without an audit log to rebuild from, it starts empty");
 });
 
 test("ledger: release frees only the open reservations of that call", (t) => {
