@@ -340,6 +340,14 @@ test("windowsOwnersScript: one line, every PowerShell single-quote character dou
   for (const bad of ["", "not json", "5", "[5]", '[{"owner":"S-1-5-18"}]']) assert.equal(P.parseWindowsOwners(bad), null, JSON.stringify(bad));
 });
 
+test("windowsPowerShellEnv: the probe gets Windows PowerShell's own module folder, whatever module path the caller had", () => {
+  const caller = { SystemRoot: "D:\\Win", Path: "C:\\bin", PSModulePath: "C:\\Program Files\\PowerShell\\7\\Modules", PSMODULEPATH: "C:\\evil" };
+  const env = P.windowsPowerShellEnv(caller);
+  assert.deepEqual(env, { SystemRoot: "D:\\Win", Path: "C:\\bin", PSModulePath: "D:\\Win\\System32\\WindowsPowerShell\\v1.0\\Modules" });
+  assert.equal(caller.PSModulePath, "C:\\Program Files\\PowerShell\\7\\Modules", "the caller's object is not changed");
+  assert.equal(P.windowsPowerShellEnv({}).PSModulePath, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules");
+});
+
 // ------------------------------------------------------------------ Windows part 2
 
 const winRuns = (groups, uac) => ({

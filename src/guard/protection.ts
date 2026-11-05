@@ -159,6 +159,25 @@ export function parseWindowsOwners(stdout: string): WindowsOwnerInfo[] | null {
   return out;
 }
 
+/**
+ * The environment the owner probe gives Windows PowerShell: the caller's, except that PSModulePath
+ * names only Windows PowerShell's own module folder. A PowerShell 7 parent passes its own module
+ * folders down. Windows PowerShell then finds Get-Acl there first and cannot load it, so every
+ * owner would read as unknown.
+ */
+export function windowsPowerShellEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  let systemRoot: string | undefined;
+  for (const [key, value] of Object.entries(env)) {
+    const name = key.toUpperCase();
+    if (name === "PSMODULEPATH") continue;
+    if (name === "SYSTEMROOT" && value) systemRoot = value;
+    out[key] = value;
+  }
+  out.PSModulePath = win32.join(systemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "Modules");
+  return out;
+}
+
 const REMOTE_PATHS_NOTE =
   "This check cannot see remote paths to admin: an SSH or Tailscale SSH key into root or an admin account, or an RMM API key " +
   "that can run scripts (they run as root/SYSTEM). The agent's user must not be able to read any of these (hardening SOP).";
@@ -207,6 +226,7 @@ export function realProbes(): ProtectionProbes {
         encoding: "utf8",
         timeout: 15_000,
         windowsHide: true,
+        env: windowsPowerShellEnv(process.env),
       });
       if (r.error || r.status !== 0) return null;
       return parseWindowsOwners(r.stdout ?? "");

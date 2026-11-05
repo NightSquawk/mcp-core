@@ -1,8 +1,8 @@
 // The CLI on a real Windows host. The other cli-*.test.mjs files drive it with
 // POSIX paths and skip on Windows; this one reads and writes real win32 paths,
 // runs the PowerShell that harness prints through Windows PowerShell, and asks
-// the hook through the real binary, the way each client starts it. It runs only
-// on Windows (the Windows CI job).
+// the hook through the real binary, the way each client starts it. It also runs
+// the guard's owner probe for real. It runs only on Windows (the Windows CI job).
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -13,6 +13,7 @@ import { cli, dist, openPolicy, tempDir } from "./cli-helpers.mjs";
 
 const { buildManifest } = await import(dist("guard/manifest.js"));
 const { commandLine } = await import(dist("cli/harness.js"));
+const { realProbes } = await import(dist("guard/protection.js"));
 
 const windows = process.platform === "win32";
 const skip = !windows && "a Windows-host test; the other cli-*.test.mjs files cover POSIX hosts";
@@ -24,11 +25,18 @@ const OPS = [
   { operationId: "create_transfer", tier: "spend", flags: { egress: true } },
 ];
 
-/** Windows PowerShell, with the script as -EncodedCommand so no command-line quoting gets in the way. */
+/** The environment without PSModulePath, as in a Windows PowerShell window an admin opens. */
+const withoutModulePath = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => k.toUpperCase() !== "PSMODULEPATH"));
+
+/**
+ * Windows PowerShell, with the script as -EncodedCommand so no command-line quoting gets in the way.
+ * It starts on its own module path: a PowerShell 7 parent, such as the CI step's shell, passes its
+ * module folders down, and Windows PowerShell cannot load Get-Acl from them.
+ */
 function powershell(script, env = {}) {
   const encoded = Buffer.from(script, "utf16le").toString("base64");
   const r = spawnSync("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], {
-    env: { ...process.env, ...env },
+    env: { ...withoutModulePath(), ...env },
     encoding: "utf8",
     timeout: 120_000,
   });
@@ -218,4 +226,26 @@ test("kill and status: the marker in a Windows policy folder", { skip }, async (
   assert.equal(readFileSync(k.json.marker, "utf8"), "maintenance (2026-11-04T12:00:00.000Z)\n");
   const s = await cli(["status", "toy", "--json"], w.io);
   assert.equal(s.json.kill.manual.server, true);
+});
+
+test("the guard's owner probe reads real owners when the parent hands down a module path Windows PowerShell cannot use", { skip }, (t) => {
+  const dir = realpathSync.native(tempDir(t, "mcp-guard-owner-"));
+  const file = join(dir, "policy.json");
+  writeFileSync(file, "{}\n");
+  // First on the inherited path: a PowerShell 7-only Microsoft.PowerShell.Security, as a PowerShell 7 parent hands down.
+  const mod = join(dir, "modules", "Microsoft.PowerShell.Security");
+  mkdirSync(mod, { recursive: true });
+  writeFileSync(join(mod, "Microsoft.PowerShell.Security.psd1"), "@{ ModuleVersion = '7.9.0'; CompatiblePSEditions = @('Core'); CmdletsToExport = @('Get-Acl') }\r\n");
+  const saved = process.env.PSModulePath;
+  process.env.PSModulePath = [join(dir, "modules"), saved].filter(Boolean).join(";");
+  t.after(() => {
+    if (saved === undefined) delete process.env.PSModulePath;
+    else process.env.PSModulePath = saved;
+  });
+
+  const owners = realProbes().windowsOwners([file]);
+  assert.ok(owners, "the probe answered");
+  assert.equal(owners.length, 1);
+  assert.match(String(owners[0].owner), /^S-1-5-/, JSON.stringify(owners));
+  assert.equal(owners[0].owner, acl(file).owner);
 });
