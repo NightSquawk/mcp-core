@@ -343,8 +343,9 @@ export class Guard<P extends BasePolicy = BasePolicy> {
     this.canaries = new Canaries(this.loaded.policy.canaries.hashes, env[CANARY_SALT_ENV]);
     if (this.canaries.misconfigured) this.warnings.push(`Canary hashes are configured but ${CANARY_SALT_ENV} is not set: non-read calls are refused until it is.`);
 
-    // A broken audit chain trips the kill switch (7.8).
-    for (const check of this.audit.verifyAll().slice(-2)) {
+    // A broken audit chain, in any month's file, trips the kill switch (7.8). mcp-guard verify and
+    // reset check every file too, and say the server trips again while a broken one is in place.
+    for (const check of this.audit.verifyAll()) {
       if (!check.ok) {
         const reason = `Audit chain broken in ${check.file} at line ${check.brokenAt} (${check.reason}).`;
         this.kill.trip("all", reason);

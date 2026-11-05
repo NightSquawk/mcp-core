@@ -732,6 +732,23 @@ describe("step 9: audit", () => {
     assert.ok(again.warnings.some((w) => /Audit chain broken/.test(w)));
   });
 
+  test("a broken chain in an older month's file trips it too, not only the last two", async (t) => {
+    const clock = manualClock("2026-08-15T10:00:00.000Z");
+    const { guard, sb } = mk(t, { guard: { clock } });
+    for (const month of ["2026-08-15", "2026-09-15", "2026-10-15", "2026-11-04"]) {
+      clock.set(`${month}T10:00:00.000Z`);
+      await exec(guard, "thing_create", { body: { month } });
+    }
+    const files = guard.audit.files();
+    assert.equal(files.length, 4);
+    const text = readFileSync(files[0], "utf8").split("\n");
+    text[0] = text[0].replace('"executed"', '"refused"');
+    writeFileSync(files[0], text.join("\n"));
+    const again = createGuard({ server: "toy", version: "1.0.0", env: sb.env, mode: "sandbox", protection: staticProtection(true, sb.policyPath), stateDir: sb.stateDir, clock, log: () => {} });
+    assert.ok(again.kill.stopped("change"));
+    assert.ok(again.warnings.some((w) => w.includes("Audit chain broken") && w.includes("audit-2026-08.jsonl")));
+  });
+
   test("onAudit sees every line and its errors never break a call", async (t) => {
     const seen = [];
     const { guard } = mk(t, {
