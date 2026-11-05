@@ -5,11 +5,11 @@
  *  2. the agent's OS user cannot become admin without a factor it lacks.
  *
  * Every OS call goes through `ProtectionProbes`, so the logic is testable with
- * recorded outputs. The real probes run `sudo -n true`, `id -Gn`, `whoami` and
- * `reg query`; none of them changes anything.
+ * recorded outputs. The real probes run `sudo -n true`, `sudo -n -l`, `doas -n true`,
+ * `id`, `whoami` and `reg query`, and read doas.conf; none of them changes anything.
  */
 import { spawnSync } from "node:child_process";
-import { closeSync, lstatSync, openSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, lstatSync, openSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { posix, win32 } from "node:path";
 import { randomBytes } from "node:crypto";
 import { DEFAULT_PROGRAM_DATA, programDataDir } from "./paths.js";
@@ -59,6 +59,8 @@ export interface ProtectionProbes {
    * and a probe that has it but returns null fails the check closed.
    */
   readText?(path: string): string | null;
+  /** The names in a folder, or null when it cannot be listed (/etc/doas.d). Optional for the same reason as readText. */
+  listDir?(path: string): string[] | null;
   /**
    * Windows: owner SID and reparse flag for each path, in one call; null when the
    * owners cannot be read (fails closed). Optional for the same reason as readText.
@@ -225,6 +227,13 @@ export function realProbes(): ProtectionProbes {
         return null;
       }
     },
+    listDir(path) {
+      try {
+        return readdirSync(path);
+      } catch {
+        return null;
+      }
+    },
     windowsOwners(paths) {
       // Fail closed without starting PowerShell: such a path cannot be quoted onto one stdin line.
       if (paths.some(hasUnsafePathChar)) return null;
@@ -361,6 +370,7 @@ export function parseGroupNames(stdout: string): string[] {
 /** Part 2 on POSIX: no passwordless sudo/doas, no root-equivalent group. */
 export function posixPart2(probes: ProtectionProbes): ProtectionPart {
   const reasons: string[] = [];
+  let doasRefused: RunResult | null = null;
   for (const tool of ["sudo", "doas"] as const) {
     const r = probes.run(tool, ["-n", "true"]);
     // Not installed, or not executable by this user (mode 4750): no path to root through it.
@@ -374,27 +384,299 @@ export function posixPart2(probes: ProtectionProbes): ProtectionPart {
       reasons.push(`Could not tell whether ${tool} needs a password: "${tool} -n true" ${r.error ? `failed (${r.error})` : `was killed${r.signal ? ` (${r.signal})` : ""}`}.`);
       continue;
     }
-    if (tool === "sudo") {
-      // "sudo -n true" only covers ALL-style rules. With the default listpw=any, "sudo -n -l" lists the
-      // rules without a password exactly when one of them is NOPASSWD (tee, vim, systemctl, ... reach root).
-      const l = probes.run("sudo", ["-n", "-l"]);
-      if (l.status === 0) {
-        const nopw = l.stdout.split(/\r?\n/).map((x) => x.trim()).filter((x) => /\bNOPASSWD\s*:/.test(x));
-        if (nopw.length) reasons.push(`sudo has NOPASSWD rule(s) for this user: ${nopw.slice(0, 3).join("; ")}${nopw.length > 3 ? ` (+${nopw.length - 3} more)` : ""}.`);
-      } else if (l.status === null && l.error !== "ENOENT" && l.error !== "EACCES") {
-        reasons.push(`Could not list this user's sudo rules: "sudo -n -l" ${l.error ? `failed (${l.error})` : "was killed"}.`);
-      }
+    if (tool === "doas") {
+      doasRefused = r;
+      continue;
+    }
+    // "sudo -n true" only covers ALL-style rules. With the default listpw=any, "sudo -n -l" lists the
+    // rules without a password exactly when one of them is NOPASSWD (tee, vim, systemctl, ... reach root).
+    const l = probes.run("sudo", ["-n", "-l"]);
+    if (l.status === 0) {
+      const nopw = l.stdout.split(/\r?\n/).map((x) => x.trim()).filter((x) => /\bNOPASSWD\s*:/.test(x));
+      if (nopw.length) reasons.push(`sudo has NOPASSWD rule(s) for this user: ${listSome(nopw)}.`);
+    } else if (l.status === null && l.error !== "ENOENT" && l.error !== "EACCES") {
+      reasons.push(`Could not list this user's sudo rules: "sudo -n -l" ${l.error ? `failed (${l.error})` : "was killed"}.`);
     }
   }
   const id = probes.run("id", ["-Gn"]);
-  if (id.status !== 0) {
+  const groups = id.status === 0 ? parseGroupNames(id.stdout) : null;
+  if (!groups) {
     reasons.push("Could not list this user's groups (id -Gn failed), so root-equivalent group membership is unknown.");
   } else {
-    const groups = parseGroupNames(id.stdout);
     const bad = groups.filter((g) => ROOT_EQUIVALENT_GROUPS.includes(g));
     if (bad.length) reasons.push(`Member of root-equivalent group(s): ${bad.join(", ")}.`);
   }
+  if (doasRefused) reasons.push(...doasRuleReasons(probes, doasRefused, groups));
   return { ok: reasons.length === 0, reasons };
+}
+
+function listSome(items: readonly string[]): string {
+  return `${items.slice(0, 3).join("; ")}${items.length > 3 ? ` (+${items.length - 3} more)` : ""}`;
+}
+
+/** Where doas reads its rules: OpenBSD and OpenDoas, then the BSD ports, MacPorts and Homebrew. */
+export const DOAS_CONFIG_FILES = Object.freeze(["/etc/doas.conf", "/usr/local/etc/doas.conf", "/usr/pkg/etc/doas.conf", "/opt/local/etc/doas.conf", "/opt/homebrew/etc/doas.conf"]);
+/** Alpine's doas also reads every *.conf file in this folder. */
+export const DOAS_CONFIG_DIR = "/etc/doas.d";
+
+export interface DoasRule {
+  /** The line the rule starts on. */
+  line: number;
+  action: "permit" | "deny";
+  /** nopass, nolog, persist, keepenv, setenv. */
+  options: string[];
+  /** A user name or uid, or ":" and a group name or gid. */
+  identity: string;
+  target?: string;
+  cmd?: string;
+  args?: string[];
+  /** The rule as one line, for messages. */
+  text: string;
+}
+
+export interface DoasConfig {
+  rules: DoasRule[];
+  /** The first part doas would refuse, or this parser cannot read. */
+  error?: { line: number; message: string };
+}
+
+const DOAS_KEYWORDS = new Set(["deny", "permit", "as", "cmd", "args", "nopass", "nolog", "persist", "keepenv", "setenv"]);
+
+type DoasToken = { kind: "word"; text: string; keyword: boolean; line: number } | { kind: "\n" | "{" | "}"; line: number };
+
+/**
+ * Split doas.conf into words the way doas does (doas.conf(5)): "#" starts a comment, double quotes
+ * keep spaces, a backslash takes the next character as it is, and a backslash at the end of a line
+ * joins the next line. A quoted or joined word is never a keyword.
+ */
+function doasTokens(text: string): { tokens: DoasToken[]; error?: { line: number; message: string } } {
+  const tokens: DoasToken[] = [];
+  let error: { line: number; message: string } | undefined;
+  let line = 1;
+  let i = 0;
+  const fail = (message: string) => {
+    error ??= { line, message };
+  };
+  while (i < text.length) {
+    const c = text[i];
+    if (c === " " || c === "\t") {
+      i++;
+      continue;
+    }
+    if (c === "\n" || c === "{" || c === "}") {
+      tokens.push({ kind: c, line });
+      if (c === "\n") line++;
+      i++;
+      continue;
+    }
+    if (c === "#") {
+      while (i < text.length && text[i] !== "\n") i++;
+      continue;
+    }
+    const start = line;
+    let word = "";
+    let quotes = false;
+    let quoted = false;
+    let escape = false;
+    let joined = false;
+    for (; i < text.length; i++) {
+      const ch = text[i];
+      if (ch === "\0") {
+        fail("a NUL character");
+        escape = false;
+        continue;
+      }
+      if (ch === "\\" && !escape) {
+        escape = true;
+        continue;
+      }
+      if (ch === "\n") {
+        if (quotes) fail("quotes not closed");
+        if (escape) {
+          escape = false;
+          joined = true;
+          line++;
+          continue;
+        }
+        break;
+      }
+      if (!escape && !quotes && (ch === "{" || ch === "}" || ch === "#" || ch === " " || ch === "\t")) break;
+      if (ch === '"' && !escape) {
+        quotes = !quotes;
+        quoted = true;
+        continue;
+      }
+      word += ch;
+      escape = false;
+    }
+    if (i >= text.length && escape) fail("a backslash at the end of the file");
+    if (i >= text.length && quotes) fail("quotes not closed");
+    if (word === "" && !quoted) continue; // a joined line with nothing on it
+    tokens.push({ kind: "word", text: word, keyword: !quoted && !joined && DOAS_KEYWORDS.has(word), line: start });
+  }
+  return error ? { tokens, error } : { tokens };
+}
+
+/** A value as doas.conf would spell it: quoted when it has spaces or quotes, or is a keyword. */
+function doasWord(w: string): string {
+  return w === "" || /[\s"#{}\\]/.test(w) || DOAS_KEYWORDS.has(w) ? JSON.stringify(w) : w;
+}
+
+/** One rule: permit [options] identity [as target] [cmd command [args ...]], or deny identity [...]. */
+function doasRule(t: DoasToken[]): DoasRule | { line: number; message: string } {
+  let k = 0;
+  const at = (w: string) => {
+    const x = t[k];
+    return x?.kind === "word" && x.keyword && x.text === w;
+  };
+  const str = (): string | null => {
+    const x = t[k];
+    if (x?.kind !== "word" || x.keyword) return null;
+    k++;
+    return x.text;
+  };
+  const bad = (message: string) => ({ line: t[Math.min(k, t.length - 1)].line, message });
+  const action = at("permit") ? "permit" : at("deny") ? "deny" : null;
+  if (!action) return bad("a rule starts with permit or deny");
+  k++;
+  const options: string[] = [];
+  while (action === "permit") {
+    const x = t[k];
+    if (x?.kind !== "word" || !x.keyword) break;
+    if (["nopass", "nolog", "persist", "keepenv"].includes(x.text)) {
+      options.push(x.text);
+      k++;
+    } else if (x.text === "setenv") {
+      k++;
+      if (t[k]?.kind !== "{") return bad("setenv is followed by { }");
+      k++;
+      while (str() !== null);
+      if (t[k]?.kind !== "}") return bad("setenv { is not closed");
+      k++;
+      options.push("setenv");
+    } else break;
+  }
+  const identity = str();
+  if (identity === null) return bad("no user or group");
+  const rule: DoasRule = { line: t[0].line, action, options, identity, text: "" };
+  if (at("as")) {
+    k++;
+    const target = str();
+    if (target === null) return bad("as is followed by a user");
+    rule.target = target;
+  }
+  if (at("cmd")) {
+    k++;
+    const cmd = str();
+    if (cmd === null) return bad("cmd is followed by a command");
+    rule.cmd = cmd;
+    if (at("args")) {
+      k++;
+      const args: string[] = [];
+      for (let a = str(); a !== null; a = str()) args.push(a);
+      rule.args = args;
+    }
+  }
+  if (k < t.length) {
+    const x = t[k];
+    return bad(`${x.kind === "word" ? `"${x.text}"` : x.kind} is not expected here`);
+  }
+  const parts = [action, ...options, doasWord(identity)];
+  if (rule.target !== undefined) parts.push("as", doasWord(rule.target));
+  if (rule.cmd !== undefined) parts.push("cmd", doasWord(rule.cmd));
+  if (rule.args !== undefined) parts.push("args", ...rule.args.map(doasWord));
+  rule.text = parts.join(" ");
+  return rule;
+}
+
+/**
+ * Parse doas.conf. doas refuses every command while its configuration has an error, but a rule
+ * this parser cannot read is reported as an error too, so a caller treats any error as unknown.
+ */
+export function parseDoasConfig(text: string): DoasConfig {
+  const { tokens, error } = doasTokens(text);
+  const rules: DoasRule[] = [];
+  let first = error;
+  for (let i = 0; i < tokens.length; ) {
+    const lineTokens: DoasToken[] = [];
+    while (i < tokens.length && tokens[i].kind !== "\n") lineTokens.push(tokens[i++]);
+    i++;
+    if (!lineTokens.length) continue;
+    const r = doasRule(lineTokens);
+    if ("action" in r) rules.push(r);
+    else if (!first || r.line < first.line) first = r;
+  }
+  return first ? { rules, error: first } : { rules };
+}
+
+/** A doas uid or gid: a name doas cannot look up is read as a number (strtonum). */
+function doasNumber(s: string): number | null {
+  return /^\s*[+-]?\d+$/.test(s) ? Number(s) : null;
+}
+
+/**
+ * "doas -n true" fails when no rule lets this user run true without a password, but a "permit
+ * nopass" rule for a single command (tee, an editor, a shell) still reaches root. doas cannot list a
+ * user's rules, so read them: from every usual place, unless doas said it has no configuration. A
+ * file this user cannot read, or text this parser cannot follow, fails closed. A later deny rule
+ * does not clear a permit nopass rule here: remove the rule itself.
+ */
+function doasRuleReasons(probes: ProtectionProbes, refused: RunResult, groups: string[] | null): string[] {
+  // "doas: doas is not enabled, /etc/doas.conf: No such file or directory": there are no rules at all.
+  if (/\bdoas is not enabled\b/.test(refused.stderr)) return [];
+  const reasons: string[] = [];
+  const files = DOAS_CONFIG_FILES.filter((f) => probes.lstat(f) !== null);
+  if (probes.lstat(DOAS_CONFIG_DIR) !== null) {
+    const names = probes.listDir?.(DOAS_CONFIG_DIR) ?? null;
+    if (names === null) reasons.push(`Cannot list ${DOAS_CONFIG_DIR}, so the doas rules in it cannot be checked.`);
+    else {
+      for (const name of [...names].sort()) {
+        const path = posix.join(DOAS_CONFIG_DIR, name);
+        if (name.endsWith(".conf") && !probes.lstat(path)?.isDirectory) files.push(path);
+      }
+    }
+  }
+  if (!files.length && !reasons.length) {
+    return [`doas is set up, but its configuration is in none of ${[...DOAS_CONFIG_FILES, `${DOAS_CONFIG_DIR}/*.conf`].join(", ")}, so this user's doas rules cannot be checked.`];
+  }
+  const nopass: { file: string; rule: DoasRule }[] = [];
+  for (const file of files) {
+    const text = probes.readText?.(file) ?? null;
+    if (text === null) {
+      reasons.push(`Cannot read ${file}, so this user's doas rules cannot be checked: a "permit nopass" rule for one command reaches root. Make it readable (doas needs only that root owns it and nobody else can write it), or let only admins run doas.`);
+      continue;
+    }
+    const conf = parseDoasConfig(text);
+    if (conf.error) reasons.push(`Cannot read the doas rules in ${file}: line ${conf.error.line}, ${conf.error.message}.`);
+    for (const rule of conf.rules) if (rule.action === "permit" && rule.options.includes("nopass")) nopass.push({ file, rule });
+  }
+  if (!nopass.length) return reasons;
+
+  const un = probes.run("id", ["-un"]);
+  const name = un.status === 0 && un.stdout.trim() ? un.stdout.trim() : null;
+  const g = probes.run("id", ["-G"]);
+  const gids = g.status === 0 ? parseGroupNames(g.stdout).map(Number).filter(Number.isSafeInteger) : null;
+  const uid = probes.getuid();
+  // true, false, or null when the id it would be compared with is unknown. A number is an id.
+  const applies = (identity: string): boolean | null => {
+    if (identity.startsWith(":")) {
+      const group = identity.slice(1);
+      const gid = doasNumber(group);
+      if (groups?.includes(group) || (gid !== null && gids?.includes(gid))) return true;
+      if (gid !== null) return gids ? false : null;
+      return groups ? false : null;
+    }
+    const n = doasNumber(identity);
+    if (identity === name || (n !== null && n === uid)) return true;
+    if (n !== null) return uid === undefined ? null : false;
+    return name === null ? null : false;
+  };
+  const show = ({ file, rule }: { file: string; rule: DoasRule }) => `${file}:${rule.line} "${rule.text}"`;
+  const hits = nopass.filter((x) => applies(x.rule.identity) === true).map(show);
+  const unsure = nopass.filter((x) => applies(x.rule.identity) === null).map(show);
+  if (hits.length) reasons.push(`doas lets this user run commands without a password: ${listSome(hits)}.`);
+  if (unsure.length) reasons.push(`Could not tell whether these doas rules without a password apply to this user ("id -un" or "id -G" failed): ${listSome(unsure)}.`);
+  return reasons;
 }
 
 // ---------------------------------------------------------------- Windows

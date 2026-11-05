@@ -9,6 +9,8 @@ import {
   AuditLog,
   canonicalJson,
   checkProtection,
+  DOAS_CONFIG_DIR,
+  DOAS_CONFIG_FILES,
   createGuard,
   deriveKey,
   hasUnsafePathChar,
@@ -16,6 +18,7 @@ import {
   Ledger,
   loadPolicy,
   MIN_KEY_LENGTH,
+  parseDoasConfig,
   parseWindowsOwners,
   posixPart1,
   posixPart2,
@@ -208,7 +211,7 @@ test("loadPolicy: schema messages say what is expected", (t) => {
 
 // ------------------------------------------------------------------ protection probes
 
-function probes({ platform = "linux", files = {}, runs = {}, uid = 1000, env = {}, texts = {}, owners, creatable = [], writable = [] } = {}) {
+function probes({ platform = "linux", files = {}, runs = {}, uid = 1000, env = {}, texts = {}, dirs, owners, creatable = [], writable = [] } = {}) {
   const calls = { run: [], readText: [], windowsOwners: [] };
   return {
     calls,
@@ -229,6 +232,8 @@ function probes({ platform = "linux", files = {}, runs = {}, uid = 1000, env = {
       calls.readText.push(p);
       return p in texts ? texts[p] : null;
     },
+    // Left out, the probe is missing, as in a hand-made double.
+    ...(dirs === undefined ? {} : { listDir: (p) => (p in dirs ? [...dirs[p]] : null) }),
     ...(owners === undefined
       ? {}
       : {
@@ -277,6 +282,94 @@ test("posixPart2: a narrow NOPASSWD rule listed by sudo -n -l is a reason; a lis
   assert.ok(posixPart2(killed).reasons.some((r) => /Could not list this user's sudo rules/.test(r)));
   const doasKilled = probes({ runs: { ...ID_OK, doas: { status: null, signal: "SIGKILL" } } });
   assert.ok(posixPart2(doasKilled).reasons.some((r) => /doas needs a password: "doas -n true" was killed \(SIGKILL\)/.test(r)));
+});
+
+// doas refuses "true" (no rule for it, or one that asks for a password); its rules are read instead.
+const DOAS_REFUSES = { status: 1, stderr: "doas: Operation not permitted\n" };
+const CONF = { isFile: true, isDirectory: false, isSymbolicLink: false, uid: 0, mode: 0o100644 };
+const FOLDER = { isFile: false, isDirectory: true, isSymbolicLink: false, uid: 0, mode: 0o40755 };
+const KIM = { ...ID_OK, doas: DOAS_REFUSES, "id -un": { status: 0, stdout: "kim\n" }, "id -G": { status: 0, stdout: "1000 100\n" } };
+const doasWith = (conf, extra = {}) => probes({ runs: KIM, files: { "/etc/doas.conf": CONF }, texts: { "/etc/doas.conf": conf }, ...extra });
+
+test("parseDoasConfig: reads rules the way doas does", () => {
+  const conf = parseDoasConfig(
+    [
+      "# admins type their password",
+      "permit persist :wheel",
+      "permit nopass kim as root cmd /usr/bin/tee args /etc/hosts # one command",
+      'permit nopass keepenv setenv { PATH=/bin FOO } :ops cmd "/usr/bin/my tool"',
+      "permit \\",
+      "    nopass bob",
+      "permit no\\pass carol",
+      "deny kim",
+      "",
+    ].join("\n"),
+  );
+  assert.equal(conf.error, undefined);
+  assert.deepEqual(
+    conf.rules.map((r) => [r.line, r.action, r.options.join(","), r.identity, r.target ?? "", r.cmd ?? "", (r.args ?? []).join(" ")]),
+    [
+      [2, "permit", "persist", ":wheel", "", "", ""],
+      [3, "permit", "nopass", "kim", "root", "/usr/bin/tee", "/etc/hosts"],
+      [4, "permit", "nopass,keepenv,setenv", ":ops", "", "/usr/bin/my tool", ""],
+      [5, "permit", "nopass", "bob", "", "", ""],
+      [7, "permit", "nopass", "carol", "", "", ""],
+      [8, "deny", "", "kim", "", "", ""],
+    ],
+  );
+  assert.equal(conf.rules[2].text, 'permit nopass keepenv setenv :ops cmd "/usr/bin/my tool"');
+  // A quoted word is never a keyword, so this names a user called nopass and then has an extra word.
+  assert.deepEqual(parseDoasConfig('permit "nopass" kim\n').error, { line: 1, message: '"kim" is not expected here' });
+  for (const bad of ["permit nopass kim cmd\n", "deny nopass kim\n", "allow kim\n", 'permit nopass "kim\n', "permit setenv { A kim\n"]) {
+    assert.ok(parseDoasConfig(bad).error, `${JSON.stringify(bad)} parsed without an error`);
+  }
+});
+
+test("posixPart2: a doas rule without a password for one command, for the user or a group, is a reason", () => {
+  const one = doasWith("permit persist :wheel\npermit nopass kim as root cmd /usr/bin/tee\n");
+  const part = posixPart2(one);
+  assert.equal(part.ok, false);
+  assert.deepEqual(part.reasons, ['doas lets this user run commands without a password: /etc/doas.conf:2 "permit nopass kim as root cmd /usr/bin/tee".']);
+  assert.deepEqual(one.calls.run, ["sudo -n true", "doas -n true", "id -Gn", "id -un", "id -G"]);
+  for (const identity of [":users", ":100", "1000", "+1000"]) {
+    assert.equal(posixPart2(doasWith(`permit nopass ${identity} cmd /usr/bin/systemctl\n`)).ok, false, identity);
+  }
+  // Rules for others, rules with a password, and deny rules are no path.
+  assert.deepEqual(posixPart2(doasWith("permit nopass bob\npermit nopass :ops\npermit nopass 2000\npermit nopass :2000\n")), { ok: true, reasons: [] });
+  const passwords = doasWith("permit persist :wheel\npermit kim\ndeny kim\n");
+  assert.deepEqual(posixPart2(passwords), { ok: true, reasons: [] });
+  assert.deepEqual(passwords.calls.run, ["sudo -n true", "doas -n true", "id -Gn"], "no rule without a password: nothing more to look up");
+  // A later deny rule does not clear a rule without a password: remove the rule itself.
+  assert.equal(posixPart2(doasWith("permit nopass kim\ndeny kim\n")).ok, false);
+});
+
+test("posixPart2: doas rules that cannot be read or followed fail closed", () => {
+  const notEnabled = probes({ runs: { ...KIM, doas: { status: 1, stderr: "doas: doas is not enabled, /etc/doas.conf: No such file or directory\n" } } });
+  assert.deepEqual(posixPart2(notEnabled), { ok: true, reasons: [] }, "no configuration: doas permits nothing");
+  assert.deepEqual(notEnabled.calls.readText, []);
+  const unreadable = posixPart2(probes({ runs: KIM, files: { "/etc/doas.conf": { ...CONF, mode: 0o100400 } } }));
+  assert.ok(unreadable.reasons.some((r) => r.startsWith("Cannot read /etc/doas.conf, so this user's doas rules cannot be checked")), JSON.stringify(unreadable.reasons));
+  const nowhere = posixPart2(probes({ runs: KIM }));
+  assert.ok(nowhere.reasons.some((r) => r.includes(`its configuration is in none of ${DOAS_CONFIG_FILES.join(", ")}, ${DOAS_CONFIG_DIR}/*.conf`)), JSON.stringify(nowhere.reasons));
+  const broken = posixPart2(doasWith("permit nopass kim cmd\n"));
+  assert.deepEqual(broken.reasons, ["Cannot read the doas rules in /etc/doas.conf: line 1, cmd is followed by a command."]);
+  const noName = posixPart2(doasWith("permit nopass kim\n", { runs: { ...KIM, "id -un": { status: 1 } } }));
+  assert.ok(noName.reasons.some((r) => r.startsWith('Could not tell whether these doas rules without a password apply to this user ("id -un" or "id -G" failed): /etc/doas.conf:1')), JSON.stringify(noName.reasons));
+  // A numeric rule is still decided by the uid alone.
+  assert.equal(posixPart2(doasWith("permit nopass 2000\n", { runs: { ...KIM, "id -un": { status: 1 } } })).ok, true);
+});
+
+test("posixPart2: Alpine's /etc/doas.d/*.conf files are read too", () => {
+  const files = { [DOAS_CONFIG_DIR]: FOLDER, "/etc/doas.d/20-wheel.conf": CONF, "/etc/doas.d/30-ops.conf": CONF, "/etc/doas.d/old": FOLDER };
+  const texts = { "/etc/doas.d/20-wheel.conf": "permit persist :wheel\n", "/etc/doas.d/30-ops.conf": "permit nopass :users cmd /sbin/reboot\n" };
+  const dirs = { [DOAS_CONFIG_DIR]: ["30-ops.conf", "README", "20-wheel.conf", "old"] };
+  const p = probes({ runs: KIM, files, texts, dirs });
+  assert.deepEqual(posixPart2(p).reasons, ['doas lets this user run commands without a password: /etc/doas.d/30-ops.conf:1 "permit nopass :users cmd /sbin/reboot".']);
+  assert.deepEqual(p.calls.readText, ["/etc/doas.d/20-wheel.conf", "/etc/doas.d/30-ops.conf"]);
+  const unlisted = posixPart2(probes({ runs: KIM, files, texts, dirs: {} }));
+  assert.ok(unlisted.reasons.includes(`Cannot list ${DOAS_CONFIG_DIR}, so the doas rules in it cannot be checked.`), JSON.stringify(unlisted.reasons));
+  const noProbe = posixPart2(probes({ runs: KIM, files, texts }));
+  assert.ok(noProbe.reasons.includes(`Cannot list ${DOAS_CONFIG_DIR}, so the doas rules in it cannot be checked.`), "a double without listDir fails closed");
 });
 
 const WIN = "C:\\ProgramData\\NightSquawk\\mcp\\toy\\policy.json";

@@ -163,7 +163,8 @@ off. The one exception is a server reporting sandbox mode, such as a provider te
 
 | OS | Fails when | Fix |
 |---|---|---|
-| Linux | `sudo -n true` or `doas -n true` succeeds (NOPASSWD, or a cached credential) | Remove the NOPASSWD rule. Keep sudo's default `timestamp_type=tty`, so a sudo you ran in another terminal does not carry over to an agent's shell; never set `timestamp_type=global` or `!tty_tickets`. Optionally put MFA on sudo (pam_duo). |
+| Linux | `sudo -n true` or `doas -n true` succeeds (NOPASSWD, or a cached credential), or `sudo -n -l` lists a NOPASSWD rule | Remove the NOPASSWD rule. Keep sudo's default `timestamp_type=tty`, so a sudo you ran in another terminal does not carry over to an agent's shell; never set `timestamp_type=global` or `!tty_tickets`. Optionally put MFA on sudo (pam_duo). |
+| Linux | doas has a `permit nopass` rule for the user, its uid, or one of its groups, even for a single command; or the check cannot read or parse the doas configuration (`/etc/doas.conf`, Alpine's `/etc/doas.d/*.conf`, and the BSD, MacPorts and Homebrew paths) | Remove the rule; a `deny` rule after it does not count, so remove the `permit nopass` itself. doas cannot list one user's rules, so the check reads the files. If they are mode 0400 or 0600, either make them readable (`chmod 0644`; doas requires only that root owns them and nobody else can write them), or let only admins run doas (`chgrp wheel` and `chmod 4750` on the doas binary). |
 | Linux | the user is in `docker`, `lxd`, `incus-admin`, `libvirt` or `disk` (each is root-equivalent) | Take the user out of them. Use rootless Docker or Podman, and run libvirt through `sudo`. |
 | Windows | the process is elevated | Never run the agent, its terminal or its client elevated. |
 | Windows | UAC is off (`EnableLUA=0`) | Turn UAC on. |
