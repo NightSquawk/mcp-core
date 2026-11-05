@@ -24,18 +24,38 @@ function trimPunctuation(token: string): string {
   return token.slice(start, end);
 }
 
+/** Scripts written without spaces between words: their runs are also split into overlapping pairs. */
+const UNSPACED = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u;
+const UNSPACED_RUN = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}\p{M}]+/gu;
+
+/** A token's length for MIN_TOKEN: a character of an unspaced script carries about a word, so counts 2. */
+function tokenWeight(token: string): number {
+  let n = 0;
+  for (const ch of token) n += UNSPACED.test(ch) ? 2 : 1;
+  return n;
+}
+
 /**
- * Normalized tokens in a piece of text: identifiers, emails, phone and account
- * numbers. Digit groups joined by spaces, dots or dashes also count as one token
- * ("021 000 021" -> "021000021"), so reformatting a number does not launder it.
+ * Normalized tokens in a piece of text: words and identifiers in any script, emails,
+ * phone and account numbers. Text is NFKC-normalized first, so full-width or other
+ * compatibility forms match their plain spelling. Digit groups joined by spaces, dots
+ * or dashes also count as one token ("021 000 021" -> "021000021"), so reformatting a
+ * number does not launder it. Runs of scripts written without spaces (Chinese, Japanese,
+ * Thai, ...) also give every pair of adjacent characters, so a name inside a sentence
+ * ("请付款给恶意公司") matches the same name as a target ("恶意公司").
  */
 export function tokensOf(text: string): string[] {
   const out = new Set<string>();
-  for (const m of text.matchAll(/[A-Za-z0-9_@.+-]+/g)) {
+  const normalized = text.normalize("NFKC");
+  for (const m of normalized.matchAll(/[\p{L}\p{M}\p{N}_@.+-]+/gu)) {
     const t = trimPunctuation(m[0]).toLowerCase();
-    if (t.length >= MIN_TOKEN) out.add(t);
+    if (tokenWeight(t) >= MIN_TOKEN) out.add(t);
   }
-  for (const m of text.matchAll(/\d(?:[\d \t.-]*\d)?/g)) {
+  for (const m of normalized.matchAll(UNSPACED_RUN)) {
+    const chars = [...m[0]].filter((ch) => !/\p{M}/u.test(ch));
+    for (let i = 0; i + 1 < chars.length; i++) out.add((chars[i]! + chars[i + 1]!).toLowerCase());
+  }
+  for (const m of normalized.matchAll(/\d(?:[\d \t.-]*\d)?/g)) {
     const digits = m[0].replace(/\D/g, "");
     if (digits.length >= MIN_TOKEN) out.add(digits);
   }
