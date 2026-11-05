@@ -910,6 +910,13 @@ export class Guard<P extends BasePolicy = BasePolicy> {
       release();
       return this.#refused(base, reservation.refusal);
     }
+    // Saving the pre-image, reading the provider's total and waiting for the ledger's lock all take
+    // time after the approval: a proposal that expired meanwhile approves nothing either.
+    if (!(this.#clock().getTime() <= Date.parse(proposal.expires_at))) {
+      release();
+      this.ledger.settle(reservation.id, "failed");
+      return this.#refused(base, refuse("approval_expired", `The proposal expired at ${proposal.expires_at} before the call could be sent. Nothing was sent; ask again.`));
+    }
     if (this.policy.client_scope?.lock_per_session && client !== null && !this.session.lockClient(client)) {
       release();
       this.ledger.settle(reservation.id, "failed");

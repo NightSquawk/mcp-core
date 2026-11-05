@@ -441,6 +441,31 @@ describe("step 6: approval", () => {
     assert.equal(h.calls.length, 1);
   });
 
+  test("a proposal that expires while the pre-image or the provider's total is read sends nothing", async (t) => {
+    // Approved in time; saving the pre-image (a destructive call) then runs past the expiry.
+    const clock = manualClock("2026-11-04T10:00:00.000Z");
+    const { guard } = mk(t, { guard: { clock } });
+    const h = stub();
+    const fetchCurrent = async () => (clock.advance(PROPOSAL_TTL_MS + 1), { id: "a", name: "old" });
+    const r = await exec(guard, "thing_delete", { pathParams: { id: "a" } }, { handler: h, hooks: { fetchCurrent } });
+    assert.equal(code(r), "approval_expired");
+    assert.match(r.refusal.message, /expired at 2026-11-04T10:05:00\.000Z before the call could be sent/);
+    assert.equal(h.calls.length, 0, "nothing was sent");
+    assert.equal(guard.idempotency.entries()[0].status, "failed", "released, so asking again can run");
+    const events = JSON.parse(readFileSync(guard.ledger.file, "utf8")).events;
+    assert.ok(events.length > 0 && events.every((e) => e.status === "failed"), "the reservation is released");
+
+    // The same when the second read of the provider's total is slow.
+    const clock2 = manualClock("2026-11-04T10:00:00.000Z");
+    let reads = 0;
+    const slow = mk(t, { guard: { clock: clock2, providerTotals: async () => (++reads === 2 && clock2.advance(PROPOSAL_TTL_MS + 1), 0) } });
+    const h2 = stub();
+    assert.equal(code(await exec(slow.guard, "payment_create", pay(), { handler: h2 })), "approval_expired");
+    assert.equal(reads, 2);
+    assert.equal(h2.calls.length, 0);
+    assert.equal(slow.guard.ledger.snapshot().spendToday("USD"), 0, "not counted against the cap");
+  });
+
   test("amount thresholds pick the approver; G4 features fail closed", async (t) => {
     const { guard } = mk(t, { policy: { ...ALL_ON, approval: { ...ALL_ON.approval, spend: { approver: "none", tiers: [{ over_cents: 1000, approver: "deny" }, { over_cents: 5000, approver: "none", quorum: 2 }] } } } });
     assert.equal(code(await exec(guard, "payment_create", pay(500))), "done");
