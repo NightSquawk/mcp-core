@@ -17,6 +17,8 @@ export interface LedgerEvent {
   t: number;
   group: Group;
   op: string;
+  /** The call's idempotency key, so that mcp-guard cancel can release its reservation. */
+  key?: string;
   cents?: number;
   currency?: string;
   status: LedgerStatus;
@@ -29,6 +31,10 @@ interface LedgerFile {
 }
 
 const KEEP_MS = 49 * 3_600_000;
+/** The audit alert mcp-guard cancel writes; a rebuild releases the call it names. */
+export const CANCEL_ALERT = "cli_cancel";
+/** Reservations a call that did not finish still holds. */
+const OPEN: ReadonlySet<LedgerStatus> = new Set(["reserved", "pending", "unknown"]);
 const WINDOW_MS = { minute: 60_000, hour: 3_600_000 } as const;
 
 export interface LedgerSnapshot {
@@ -61,10 +67,14 @@ export class Ledger {
     }
   }
 
-  /** Rebuild from the audit log: every executed, pending or unknown-outcome call. */
+  /** Rebuild from the audit log: every executed, pending or unknown-outcome call, less the ones mcp-guard cancel released. */
   #rebuild(): LedgerFile {
     const events: LedgerEvent[] = [];
     for (const l of this.#audit?.read() ?? []) {
+      if (l.alert === CANCEL_ALERT && typeof l.idempotency_key === "string") {
+        for (const e of events) if (e.key === l.idempotency_key && OPEN.has(e.status)) e.status = "failed";
+        continue;
+      }
       // read() already drops lines that are not audit lines; also skip ones with fields of the wrong type.
       if (typeof l.group !== "string" || l.dry_run || Number.isNaN(Date.parse(l.ts)) || typeof l.operation !== "string") continue;
       const status: LedgerStatus | null =
@@ -75,6 +85,7 @@ export class Ledger {
         t: Date.parse(l.ts),
         group: l.group,
         op: l.operation,
+        ...(typeof l.idempotency_key === "string" ? { key: l.idempotency_key } : {}),
         ...(typeof l.amount_cents === "number" && Number.isFinite(l.amount_cents) ? { cents: l.amount_cents } : {}),
         ...(typeof l.currency === "string" ? { currency: l.currency } : {}),
         status,
@@ -118,6 +129,26 @@ export class Ledger {
       f.events.push({ ...event, id, t: now, status: "reserved" });
       writeJsonFile(this.file, f);
       return { id };
+    });
+  }
+
+  /**
+   * Release every reservation a call still holds (mcp-guard cancel), so that it stops counting
+   * against the caps and the retry that cancel allows can run. Completed calls are kept.
+   * Returns how many were released.
+   */
+  release(key: string): number {
+    return withFileLock(this.#lock, () => {
+      const f = this.#load();
+      let n = 0;
+      for (const e of f.events) {
+        if (e.key === key && OPEN.has(e.status)) {
+          e.status = "failed";
+          n++;
+        }
+      }
+      if (n) writeJsonFile(this.file, f);
+      return n;
     });
   }
 

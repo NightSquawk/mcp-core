@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { dist, manualClock, runWorkers, tempDir } from "./foundation-helpers.mjs";
 
-const { Ledger } = await import(dist("guard/ledger.js"));
+const { Ledger, CANCEL_ALERT } = await import(dist("guard/ledger.js"));
 const { AuditLog } = await import(dist("guard/audit.js"));
 
 const ok = (r) => {
@@ -128,6 +128,31 @@ test("ledger: a corrupt ledger file is rebuilt from the audit log", (t) => {
   assert.equal(l.snapshot().spendToday("USD"), 2000);
   writeFileSync(l.file, JSON.stringify({ version: 1, events: "nope" }));
   assert.equal(l.snapshot().spendToday("USD"), 0, "a well-formed file with a bad shape is read as empty (advisory; providerTotals backs the cap)");
+});
+
+test("ledger: release frees only the open reservations of that call", (t) => {
+  const l = new Ledger(tempDir(t), { clock: manualClock("2026-11-04T12:00:00.000Z") });
+  const spend = (key, cents) => ok(l.reserve({ group: "spend", op: "pay", key, cents, currency: "USD" }, always));
+  l.settle(spend("A", 100), "pending");
+  spend("A", 200); // still reserved: its process died mid-call
+  l.settle(spend("A", 400), "done");
+  l.settle(spend("B", 800), "pending");
+  assert.equal(l.release("A"), 2);
+  assert.equal(l.snapshot().spendToday("USD"), 1200, "A's completed call and B's still count");
+  assert.equal(l.release("A"), 0, "nothing left to release");
+  assert.equal(l.release("nobody"), 0);
+});
+
+test("ledger: a rebuild releases what mcp-guard cancel released, and counts a later retry", (t) => {
+  const dir = tempDir(t);
+  const clock = manualClock("2026-11-04T12:00:00.000Z");
+  const audit = new AuditLog(dir, "column", { clock });
+  const base = { server: "column", version: "t", guard: "t", session: "s", tool: "column_spend", tier: "spend", group: "spend", mode: "live", dry_run: false, currency: "USD" };
+  audit.append({ ...base, operation: "pay", decision: "pending", idempotency_key: "A", amount_cents: 200 });
+  audit.append({ ...base, operation: "pay", decision: "unknown_outcome", idempotency_key: "B", amount_cents: 300 });
+  audit.append({ ...base, tool: "mcp-guard", operation: "cli.cancel", tier: "unknown", group: null, mode: "none", decision: "alert", alert: CANCEL_ALERT, idempotency_key: "A", currency: undefined });
+  audit.append({ ...base, operation: "pay", decision: "executed", idempotency_key: "A", amount_cents: 200 });
+  assert.equal(new Ledger(dir, { clock, audit }).snapshot().spendToday("USD"), 500, "B's 300 and A's retry; not A's cancelled call");
 });
 
 test("ledger: owner-only file", { skip: process.platform === "win32" }, (t) => {

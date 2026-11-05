@@ -1,11 +1,12 @@
 // mcp-guard cancel: reopen a pending or unknown-outcome call, never a completed or running one.
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cli, dist, manualClock, sandbox, test } from "./cli-helpers.mjs";
 
 const { AuditLog } = await import(dist("guard/audit.js"));
 const { IdempotencyStore, deriveKey } = await import(dist("guard/idempotency.js"));
+const { Ledger } = await import(dist("guard/ledger.js"));
 
 const DAY = "2026-11-04";
 
@@ -67,7 +68,7 @@ test("an unknown outcome is reopened only after typing the key's last 12 charact
   assert.equal(lines.length, 1);
   assert.equal(lines[0].alert, "cli_cancel");
   assert.equal(lines[0].idempotency_key, key);
-  assert.equal(lines[0].note, "marked unknown entry failed");
+  assert.equal(lines[0].note, "marked unknown entry failed; released 0 ledger reservation(s)");
 });
 
 test("a pending call needs its approval reference typed", async (t) => {
@@ -84,6 +85,32 @@ test("a pending call needs its approval reference typed", async (t) => {
   assert.equal(right.code, 0);
   assert.match(right.text, /Nothing was cancelled at the provider/);
   assert.equal(statusOf(store, key), "failed");
+});
+
+test("cancel releases the call's ledger reservation, so the retry it allows is not refused for it", async (t) => {
+  const sb = sandbox(t);
+  const clock = manualClock();
+  const dir = sb.serverState("column");
+  const { key, store } = entry(sb, clock, "column", "pending");
+  // What the guard left, in its order: a reservation of 500 USD settled pending, then the audit line.
+  const audit = new AuditLog(dir, "column", { clock });
+  const ledger = new Ledger(dir, { clock, audit });
+  const r = ledger.reserve({ group: "spend", op: "create_transfer", key, cents: 500, currency: "USD" }, () => null);
+  ledger.settle(r.id, "pending");
+  const line = { server: "column", version: "t", guard: "t", session: "s", tool: "column_spend", tier: "spend", group: "spend", mode: "live", dry_run: false };
+  audit.append({ ...line, operation: "create_transfer", decision: "pending", idempotency_key: key, amount_cents: 500, currency: "USD" });
+  assert.equal(ledger.snapshot().spendToday("USD"), 500);
+
+  const out = await cli(["cancel", key.slice(0, 20), "--json"], { env: sb.env, clock, interactive: true, answers: ["APR-123"] });
+  assert.equal(out.code, 0);
+  assert.equal(out.json.ledger_released, 1);
+  assert.equal(statusOf(store, key), "failed");
+  assert.equal(ledger.snapshot().spendToday("USD"), 0, "no longer counted");
+  assert.match(audit.read().at(-1).note, /released 1 ledger reservation/);
+
+  // A ledger rebuilt from the audit log releases it again.
+  rmSync(ledger.file);
+  assert.equal(new Ledger(dir, { clock, audit }).snapshot().spendToday("USD"), 0);
 });
 
 test("a pending call without a reference needs 'cancelled'", async (t) => {

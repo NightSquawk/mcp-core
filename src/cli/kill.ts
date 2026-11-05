@@ -13,6 +13,7 @@ import { copyFileSync, existsSync, mkdirSync, renameSync, unlinkSync, writeFileS
 import { AuditLog, type AuditEntry } from "../guard/audit.js";
 import { IdempotencyStateError, IdempotencyStore, type IdemEntry } from "../guard/idempotency.js";
 import { KillSwitch } from "../guard/kill-switch.js";
+import { Ledger } from "../guard/ledger.js";
 import { readJsonFile } from "../guard/lock.js";
 import { hasUnsafePathChar } from "../guard/protection.js";
 import { GUARD_VERSION } from "../guard/version.js";
@@ -299,10 +300,21 @@ export async function cancelCommand(args: CancelArgs, io: CliIo): Promise<Outcom
   await confirmTyped(io, what, expected);
   const changed = store.cancel(entry.key);
   if (!changed) throw new CliError(`${where} changed while you were confirming; mcp-guard status ${ctx.server} shows it now.`, EXIT.fail, data);
-  const warning = cliAlert(io, ctx, "cancel", `marked ${entry.status} entry failed`, { idempotency_key: entry.key });
+  // The call's reservation still counts against the spend and rate caps: release it too, or the
+  // retry this allows is refused for the amount of the call it replaces.
+  const warnings: string[] = [];
+  let released = 0;
+  try {
+    released = new Ledger(ctx.stateDir, { clock: io.clock, audit: new AuditLog(ctx.stateDir, ctx.server, { clock: io.clock }) }).release(entry.key);
+  } catch (e) {
+    warnings.push(`The ledger still counts this call against today's caps (${(e as Error).message}); it stops counting after 49 hours.`);
+  }
+  // Written as cli_cancel (CANCEL_ALERT): a ledger rebuilt from the audit log releases the call again.
+  const auditWarning = cliAlert(io, ctx, "cancel", `marked ${entry.status} entry failed; released ${released} ledger reservation(s)`, { idempotency_key: entry.key });
+  if (auditWarning) warnings.push(auditWarning);
   return {
     code: EXIT.ok,
-    data: { ...data, changed: true, new_status: changed.status, ...(warning ? { warning } : {}) },
-    text: [`Marked failed: a retry of ${entry.operation} will run it again. Nothing was cancelled at the provider.`, ...(warning ? [warning] : [])],
+    data: { ...data, changed: true, new_status: changed.status, ledger_released: released, ...(warnings.length ? { warning: warnings.join(" ") } : {}) },
+    text: [`Marked failed: a retry of ${entry.operation} will run it again. Nothing was cancelled at the provider.`, ...warnings],
   };
 }

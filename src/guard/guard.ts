@@ -926,7 +926,7 @@ export class Guard<P extends BasePolicy = BasePolicy> {
     let reservation: { refusal: Refusal } | { id: string };
     try {
       reservation = this.ledger.reserve(
-        { group, op: op.operationId, ...(typeof extraction.amount_cents === "number" ? { cents: extraction.amount_cents } : {}), ...(extraction.currency ? { currency: extraction.currency } : {}) },
+        { group, op: op.operationId, key, ...(typeof extraction.amount_cents === "number" ? { cents: extraction.amount_cents } : {}), ...(extraction.currency ? { currency: extraction.currency } : {}) },
         (s) => (group === "spend" ? this.#spendRefusal(extraction.amount_cents as number, extraction.currency as string, s, providerToday) : null) ?? this.#rateRefusal(group, s)
       );
     } catch (e) {
