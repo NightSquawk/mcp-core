@@ -191,18 +191,24 @@ export function renderExecute(out: ExecuteOutcome, maxChars = DEFAULT_MAX_RESULT
       return text({ dry_run: true, ...out.preview });
     case "deduplicated":
       return text({ deduplicated: true, operation_id: out.operation, idempotency_key: out.idempotency_key, original: out.original, message: out.message });
-    case "pending":
-      return text({
+    case "pending": {
+      const held = {
         pending: true,
         operation_id: out.operation,
         idempotency_key: out.idempotency_key,
         status: out.http_status ?? null,
         provider_ids: out.provider_ids,
         hold: out.hold,
-        message: out.message,
-        ...untrustedPart(out.untrusted_fields, out.untrusted_whole),
-        result: out.data,
+      };
+      const s = JSON.stringify({ ...held, message: out.message, ...untrustedPart(out.untrusted_fields, out.untrusted_whole), result: out.data });
+      if (s.length <= maxChars) return { content: [{ type: "text", text: s }] };
+      // The provider already holds the action: never refuse here, only shorten.
+      return text({
+        ...held,
+        result_truncated: true,
+        message: [out.message, `The provider's answer was ${s.length} characters, too long to return; read the object back with the read tool.`].filter(Boolean).join(" "),
       });
+    }
     case "failed":
       return text({ failed: true, operation_id: out.operation, idempotency_key: out.idempotency_key, status: out.http_status ?? null, error: out.error, message: out.message }, true);
     case "unknown_outcome":

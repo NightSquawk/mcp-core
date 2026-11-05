@@ -157,6 +157,19 @@ describe("render functions", () => {
     const refused = renderExecute({ status: "refused", refusal: { refused: true, reason_code: "blocked", message: "no" } });
     assert.equal(refused.isError, true);
   });
+
+  test("an oversized pending result is cut, never refused: the provider already holds the action", () => {
+    const out = { status: "pending", operation: "x", idempotency_key: "k", http_status: 202, provider_ids: ["obj_1"], hold: { ref: "r" }, message: "Held by the provider.", data: { blob: "x".repeat(1000) }, untrusted_whole: true };
+    const cut = renderExecute(out, 300);
+    assert.equal(cut.isError, undefined);
+    const { message, ...rest } = JSON.parse(cut.content[0].text);
+    assert.deepEqual(rest, { pending: true, operation_id: "x", idempotency_key: "k", status: 202, provider_ids: ["obj_1"], hold: { ref: "r" }, result_truncated: true }, "no result, so no untrusted note either");
+    assert.match(message, /^Held by the provider\. The provider's answer was \d+ characters, too long to return; read the object back with the read tool\.$/);
+    const small = JSON.parse(renderExecute({ ...out, data: { id: "obj_1" } }, 2000).content[0].text);
+    assert.deepEqual(small.result, { id: "obj_1" });
+    assert.equal(small.untrusted_whole, true);
+    assert.equal(small.result_truncated, undefined);
+  });
 });
 
 describe("default list and describe", () => {
