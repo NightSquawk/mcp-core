@@ -19,7 +19,7 @@ import { hasUnsafePathChar, lookupSteps, realProbes } from "../guard/protection.
 import type { Group } from "../guard/tiers.js";
 import { clientPaths, codexHome } from "./clients.js";
 import { pathLib, requireServer, serverContext, stateRoot } from "./context.js";
-import { policyFileCommands, SID, windowsCheckedWrite, windowsFolderCommands } from "./init.js";
+import { policyFileCommands, windowsFolderCommands } from "./init.js";
 import { CliError, errnoCode, EXIT, rootWarning, type CliIo, type Outcome } from "./io.js";
 import { checkManifest, locateManifest, readManifest } from "./manifest.js";
 import {
@@ -37,7 +37,7 @@ import {
   type ToolRule,
 } from "./rules.js";
 import { taintDir } from "./taint.js";
-import { adminCommands, psQuote, renderAdmin, shQuote, type AdminCommands } from "./shell.js";
+import { adminCommands, psHereString, psQuote, renderAdmin, shHereDoc, shQuote, type AdminCommands } from "./shell.js";
 import { table } from "./status.js";
 
 export type HarnessClient = "claude" | "codex" | "cursor";
@@ -95,32 +95,30 @@ const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "obj
 
 /**
  * Admin commands that write one file outside the policy root (root-owned, 0644; Windows: Administrators
- * own it, Users read). On Windows, /reset drops every explicit entry the new file was created with,
- * such as full control for the admin who wrote it when its folder passes nothing down: /grant:r only
- * replaces the entries it names. The owner is set first, so the reset file stays writable for icacls.
+ * own it, Users read). On Windows, Set-AdminFile resets the new file before it grants, which drops
+ * every explicit entry the file was created with, such as full control for the admin who wrote it
+ * when its folder passes nothing down: /grant:r only replaces the entries it names.
  *
  * `top` is the client's own machine-wide folder (C:\Program Files\ClaudeCode, C:\ProgramData\Cursor).
- * On Windows it and every folder below it down to the file are taken over before the file is written:
- * anyone may create a folder in ProgramData, and whoever owns the folder can delete the file and put
- * their own in its place. `top` itself stops inheriting, so Users only read what is in it.
+ * On Windows it and every folder below it down to the file are taken over, top first, before the file
+ * is written: anyone may create a folder in ProgramData, and whoever owns the folder can delete the
+ * file and put their own in its place. `top` itself stops inheriting, so Users only read what is in it.
+ * adminCommands() makes the statements one block, which stops at the first step that fails.
  */
 export function adminFileCommands(platform: NodeJS.Platform, file: string, text: string, top?: string): string[] {
   if (platform === "win32") {
     const dir = win32.dirname(file);
     const chain = top === undefined ? [] : folderChain(top, dir);
     return [
-      `New-Item -ItemType Directory -Force -Path ${psQuote(dir)} | Out-Null`,
-      ...windowsFolderCommands(chain, (d) => d === chain[0]),
-      `$content = @'\n${text}'@`,
-      windowsCheckedWrite(file, chain, "$content"),
-      `icacls ${psQuote(file)} /setowner '${SID.administrators}' /L /C`,
-      `icacls ${psQuote(file)} /reset /L /C`,
-      `icacls ${psQuote(file)} /inheritance:r /grant:r '${SID.system}:F' '${SID.administrators}:F' '${SID.users}:RX' /L /C`,
+      ...(chain.length ? windowsFolderCommands(chain, (d) => d === chain[0]) : [`New-Item -ItemType Directory -Force -Path ${psQuote(dir)} | Out-Null`]),
+      psHereString("content", text),
+      `Write-NewFile ${psQuote(file)} $content`,
+      `Set-AdminFile ${psQuote(file)} -Protect`,
     ];
   }
   return [
     `sudo install -d -m 0755 -o 0 -g 0 ${shQuote(posix.dirname(file))}`,
-    `sudo tee ${shQuote(file)} > /dev/null <<'EOF'\n${text}EOF`,
+    shHereDoc(`sudo tee ${shQuote(file)} > /dev/null`, text),
     `sudo chown 0:0 ${shQuote(file)}`,
     `sudo chmod 0644 ${shQuote(file)}`,
   ];
@@ -744,9 +742,9 @@ export function harnessCommand(args: HarnessArgs, io: CliIo): Outcome {
   }
   built.notes.push(`Run harness again whenever the server adds, renames or regroups tools (manifest ${info.version}).`);
 
-  // Two files in one folder: create the folder once.
+  // Two files in one folder: create (or take over) the folder once.
   const dirs = new Set<string>();
-  const commands = built.commands.filter((c) => !/^(sudo install -d |New-Item -ItemType Directory )/.test(c) || (!dirs.has(c) && Boolean(dirs.add(c))));
+  const commands = built.commands.filter((c) => !/^(sudo install -d |New-Item -ItemType Directory |Set-AdminFolder )/.test(c) || (!dirs.has(c) && Boolean(dirs.add(c))));
   const admin: AdminCommands | null = commands.length ? adminCommands(io.platform, commands) : null;
   const lib = pathLib(io.platform);
   const rows: string[][] = [["tool", "group", "rule"], ...decisions.map((d) => [d.tool, d.group, d.rule])];

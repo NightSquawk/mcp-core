@@ -16,6 +16,7 @@ const { commandLine } = await import(dist("cli/harness.js"));
 const { realProbes, TRUSTED_OWNER_SIDS } = await import(dist("guard/protection.js"));
 const { programDataDir } = await import(dist("guard/paths.js"));
 const { starterPolicyText, windowsPolicyCommands } = await import(dist("cli/init.js"));
+const { powershellBlock } = await import(dist("cli/shell.js"));
 
 const windows = process.platform === "win32";
 const skip = !windows && "a Windows-host test; the other cli-*.test.mjs files cover POSIX hosts";
@@ -111,7 +112,7 @@ function acl(path) {
   return JSON.parse(r.stdout);
 }
 
-test("harness --claude --hook: the printed PowerShell installs the drop-in as printed, and the hook denies through the real binary", { skip }, async (t) => {
+test("harness --claude --hook: the printed PowerShell installs the drop-in as printed, and the hook denies through the real binary", { skip: skipUnelevated }, async (t) => {
   const w = world(t);
   const r = await cli(["harness", "toy", "--claude", "--hook", "--package", w.pkg, "--json"], w.io);
   assert.equal(r.code, 3, JSON.stringify(r.json));
@@ -125,29 +126,25 @@ test("harness --claude --hook: the printed PowerShell installs the drop-in as pr
   assert.deepEqual(entry.hooks, [{ type: "command", command: process.execPath, args: [SCRIPT, "hook", "claude", "toy"], timeout: 10, onFailure: "block" }]);
   assert.equal(r.json.files.find((x) => x.path.endsWith("harness-claude.json")).path, join(w.policy, "toy", "harness-claude.json"));
 
-  // What an admin pastes, minus the ACL change unless this shell is elevated.
-  const commands = elevated ? r.json.admin.commands : r.json.admin.commands.filter((c) => !c.startsWith("icacls "));
-  const ps = powershell(asScript(commands));
+  // What an admin pastes: one block.
+  assert.equal(r.json.admin.commands.length, 1);
+  const ps = powershell(asScript(r.json.admin.commands));
   assert.equal(ps.status, 0, ps.stderr || ps.stdout);
   const installed = readFileSync(dropIn, "utf8");
   assert.ok(!installed.startsWith("\uFEFF"), "the drop-in starts with a BOM");
   assert.equal(installed.replaceAll("\r\n", "\n"), f.content.replace(/\n$/, ""), "the here-string holds the file as printed");
-  if (elevated) {
-    assert.deepEqual(acl(dropIn), {
-      owner: "S-1-5-32-544",
-      protected: true,
-      rules: [
-        "S-1-5-18 Allow FullControl inherited=False",
-        "S-1-5-32-544 Allow FullControl inherited=False",
-        "S-1-5-32-545 Allow ReadAndExecute, Synchronize inherited=False",
-      ],
-    });
-    // ClaudeCode stops inheriting; managed-settings.d takes what it hands down.
-    assert.deepEqual(acl(w.clientPaths.claudeManaged), { owner: ADMINS, protected: true, rules: adminOnly(false) });
-    assert.deepEqual(acl(dirname(dropIn)), { owner: ADMINS, protected: false, rules: adminOnly(true) });
-  } else {
-    t.diagnostic("not elevated: the icacls lines were not run");
-  }
+  assert.deepEqual(acl(dropIn), {
+    owner: "S-1-5-32-544",
+    protected: true,
+    rules: [
+      "S-1-5-18 Allow FullControl inherited=False",
+      "S-1-5-32-544 Allow FullControl inherited=False",
+      "S-1-5-32-545 Allow ReadAndExecute, Synchronize inherited=False",
+    ],
+  });
+  // ClaudeCode stops inheriting; managed-settings.d takes what it hands down.
+  assert.deepEqual(acl(w.clientPaths.claudeManaged), { owner: ADMINS, protected: true, rules: adminOnly(false) });
+  assert.deepEqual(acl(dirname(dropIn)), { owner: ADMINS, protected: false, rules: adminOnly(true) });
 
   // Claude Code starts exec-form hooks without a shell: command, then args.
   const ask = (request) =>
@@ -162,7 +159,7 @@ test("harness --claude --hook: the printed PowerShell installs the drop-in as pr
   assert.equal(allowed.stdout, "", "an allowed tool gets no answer, so Claude's own rules decide");
 });
 
-test("harness --cursor: hooks.json installs as printed, and the printed test line denies in PowerShell", { skip }, async (t) => {
+test("harness --cursor: hooks.json installs as printed, and the printed test line denies in PowerShell", { skip: skipUnelevated }, async (t) => {
   const w = world(t);
   const r = await cli(["harness", "toy", "--cursor", "--package", w.pkg, "--json"], w.io);
   assert.equal(r.code, 3, JSON.stringify(r.json));
@@ -171,14 +168,11 @@ test("harness --cursor: hooks.json installs as printed, and the printed test lin
   const hooks = r.json.files.find((x) => x.path === w.clientPaths.cursorHooks);
   assert.deepEqual(JSON.parse(hooks.content), { version: 1, hooks: { beforeMCPExecution: [{ command, timeout: 10, failClosed: true }] } });
 
-  const commands = elevated ? r.json.admin.commands : r.json.admin.commands.filter((c) => !c.startsWith("icacls "));
-  const ps = powershell(asScript(commands));
+  const ps = powershell(asScript(r.json.admin.commands));
   assert.equal(ps.status, 0, ps.stderr || ps.stdout);
   assert.deepEqual(JSON.parse(readFileSync(w.clientPaths.cursorHooks, "utf8")), JSON.parse(hooks.content));
-  if (elevated) {
-    assert.deepEqual(acl(dirname(w.clientPaths.cursorHooks)), { owner: ADMINS, protected: true, rules: adminOnly(false) });
-    assert.deepEqual(acl(w.clientPaths.cursorHooks), { owner: ADMINS, protected: true, rules: adminOnly(false) });
-  }
+  assert.deepEqual(acl(dirname(w.clientPaths.cursorHooks)), { owner: ADMINS, protected: true, rules: adminOnly(false) });
+  assert.deepEqual(acl(w.clientPaths.cursorHooks), { owner: ADMINS, protected: true, rules: adminOnly(false) });
 
   // The line an admin runs once the files are in place.
   assert.equal(r.json.test.length, 1);
@@ -231,12 +225,26 @@ test("harness --cursor: a junction in place of the Cursor folder is refused, and
 
   const r = await cli(["harness", "toy", "--cursor", "--package", w.pkg, "--json"], w.io);
   assert.equal(r.code, 3, JSON.stringify(r.json));
-  const commands = elevated ? r.json.admin.commands : r.json.admin.commands.filter((c) => !c.startsWith("icacls "));
-  const ps = powershell(asScript(commands));
+  // The link is refused before anything changes, so this needs no elevation.
+  const ps = powershell(asScript(r.json.admin.commands));
   assert.notEqual(ps.status, 0, "the commands stop at the junction");
   assert.match(`${ps.stderr}${ps.stdout}`.replace(/\s+/g, " "), /is a junction or symbolic link/);
   assert.equal(existsSync(join(elsewhere, "hooks.json")), false, "nothing was written through the junction");
-  assert.deepEqual(acl(elsewhere), before, "icacls /L changed the junction, not the folder it leads to");
+  assert.deepEqual(acl(elsewhere), before, "nothing changed where the junction leads");
+});
+
+test("init: a ProgramData that lets Users change what it holds stops the commands before the policy is written", { skip: skipUnelevated }, (t) => {
+  const base = realpathSync.native(tempDir(t, "mcp-guard-init-"));
+  const pd = join(base, "ProgramData");
+  mkdirSync(pd);
+  // Users may modify (and so rename or delete) every folder that inherits this, NightSquawk included.
+  icacls(pd, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", `*${ADMINS}:(OI)(CI)F`, "*S-1-5-32-545:(OI)(CI)M");
+  const root = join(pd, "NightSquawk", "mcp");
+  const ps = powershell(asScript([powershellBlock(windowsPolicyCommands(root, "toy", starterPolicyText("toy")))]));
+  assert.notEqual(ps.status, 0, "the check after the takeover stops the commands");
+  // Without white space: PowerShell wraps a long error message at the console width.
+  assert.match(`${ps.stderr}${ps.stdout}`.replace(/\s+/g, ""), /S-1-5-32-545canstillchange.*NightSquawk\(Modify,Synchronize\)/);
+  assert.equal(existsSync(root), false, "nothing after the check ran");
 });
 
 test("harness --codex on Windows says to check who owns the ProgramData folders", { skip }, async (t) => {

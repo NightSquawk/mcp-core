@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { cli, dist, sandbox, test } from "./cli-helpers.mjs";
 
 const { starterPolicyText, windowsPolicyCommands, posixPolicyCommands } = await import(dist("cli/init.js"));
+const { powershellBlock } = await import(dist("cli/shell.js"));
 const { basePolicySchema } = await import(dist("guard/policy.js"));
 
 // A name no real install uses, so the standard-path tests never meet a real policy.
@@ -95,33 +96,31 @@ test("standard paths on Windows: each folder is taken over, top first, before th
   const root = `${parent}\\mcp`;
   const dir = `${root}\\${SERVER}`;
   const file = `${dir}\\policy.json`;
-  assert.deepEqual(r.json.admin.commands, windowsPolicyCommands(root, SERVER, starterPolicyText(SERVER)));
-  const cmds = r.json.admin.commands;
-  const at = (s) => {
-    const i = cmds.indexOf(s);
-    assert.ok(i >= 0, s);
-    return i;
-  };
-  const write = cmds.findIndex((c) => c.includes("[System.IO.File]::WriteAllText("));
-  let last = -1;
-  for (const p of [parent, root, dir, file]) {
-    const set = at(`icacls '${p}' /setowner '*S-1-5-32-544' /L /C`);
-    const reset = at(`icacls '${p}' /reset /L /C`);
-    assert.ok(last < set && set < reset, `top first, and the owner before /reset: ${p}`);
-    assert.ok(p === file ? set > write : reset < write, `${p} is taken over ${p === file ? "after" : "before"} the write`);
-    assert.ok(cmds[write].includes(`'${p}'`), `the write refuses a link at ${p}`);
-    last = reset;
-  }
-  assert.deepEqual(
-    cmds.filter((c) => c.includes("/inheritance:r")),
-    [`icacls '${root}' /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /L /C`],
-    "only the policy root stops inheriting; NightSquawk keeps ProgramData's permissions"
-  );
-  assert.ok(!cmds.some((c) => /\/T\b/.test(c)), "never recursive: /T can follow a junction planted inside");
-  const policy = cmds.findIndex((c) => c.startsWith("$policy = @'\n"));
-  assert.ok(policy > 0 && policy < write && cmds[policy].endsWith("\n'@"), "here-string terminator at the start of its line");
-  assert.match(cmds[write], /ReparsePoint\) \{ throw "\$p is a junction or symbolic link, so nothing was written\./);
-  assert.equal(cmds.at(-1), `icacls '${file}'`, "the result is shown last");
+  const policy = starterPolicyText(SERVER);
+  // NightSquawk keeps ProgramData's permissions (Users may add to it); only the policy root stops inheriting.
+  assert.deepEqual(windowsPolicyCommands(root, SERVER, policy), [
+    `Set-AdminFolder '${parent}' -UsersMayCreate`,
+    `Set-AdminFolder '${root}' -Protect`,
+    `Set-AdminFolder '${dir}'`,
+    `$policy = @'\n${policy}'@`,
+    `Write-NewFile '${file}' $policy`,
+    `Set-AdminFile '${file}'`,
+    `icacls '${file}'`,
+  ]);
+  // One block, which stops at the first step that fails, with the helpers it calls defined first.
+  assert.deepEqual(r.json.admin.commands, [powershellBlock(windowsPolicyCommands(root, SERVER, policy))]);
+  const block = r.json.admin.commands[0];
+  assert.ok(block.startsWith("& {\n") && block.endsWith("\n}"), block.slice(0, 40));
+  assert.match(block, /^\$ErrorActionPreference = 'Stop'$/m);
+  for (const f of ["icacls", "Get-Attributes", "Assert-NoLink", "Set-AdminFolder", "Write-NewFile", "Set-AdminFile"]) assert.match(block, new RegExp(`^function ${f}\\b`, "m"), f);
+  const lines = block.split("\n");
+  assert.ok(lines.indexOf(`Set-AdminFolder '${dir}'`) < lines.indexOf(`Write-NewFile '${file}' $policy`), "the folders are taken over before the write");
+  const runs = lines.filter((l) => /\bicacls (\$Path|')/.test(l));
+  assert.equal(runs.length, 7, runs.join("\n"));
+  assert.ok(runs.every((l) => !/ \/[TC]\b/.test(l)), "never recursive (/T can follow a junction planted inside), and no /C: a failure stops the block");
+  assert.match(block, /icacls \$Path \/setowner '\*S-1-5-32-544' \/L\n {2}icacls \$Path \/reset \/L\n/, "the owner is set before each /reset");
+  assert.match(block, /\n'@\nWrite-NewFile /, "here-string terminator at the start of its line");
+  assert.equal(lines.at(-2), `icacls '${file}'`, "the result is shown last");
   assert.deepEqual(r.json.warnings, []);
 
   const text = await cli(["init", SERVER], { env: { ProgramData: "C:\\ProgramData" }, platform: "win32" });
@@ -135,7 +134,7 @@ test("Windows: a moved ProgramData is warned about and every quote character is 
   if (r.code === 1) return;
   assert.equal(r.code, 3);
   assert.ok(r.json.warnings.some((w) => w.includes("D:\\Pro\u2019gram Data") && w.includes("C:\\ProgramData")));
-  assert.ok(r.json.admin.commands.includes("icacls 'D:\\Pro\u2019\u2019gram Data\\NightSquawk' /reset /L /C"), "U+2019 is doubled like an ASCII quote");
+  assert.ok(r.json.admin.commands[0].includes("\nSet-AdminFolder 'D:\\Pro\u2019\u2019gram Data\\NightSquawk' -UsersMayCreate\n"), "U+2019 is doubled like an ASCII quote");
 });
 
 test("the POSIX commands quote paths with single quotes", () => {

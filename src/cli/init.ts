@@ -12,7 +12,7 @@ import { basePolicySchema } from "../guard/policy.js";
 import { DEFAULT_PROGRAM_DATA, programDataDir } from "../guard/paths.js";
 import { requireServer, serverContext } from "./context.js";
 import { CliError, EXIT, rootWarning, type CliIo, type Outcome } from "./io.js";
-import { adminCommands, psQuote, renderAdmin, shQuote, type AdminCommands } from "./shell.js";
+import { adminCommands, psHereString, psQuote, renderAdmin, shHereDoc, shQuote, type AdminCommands } from "./shell.js";
 
 export interface InitArgs {
   server?: string;
@@ -20,44 +20,16 @@ export interface InitArgs {
   print?: boolean;
 }
 
-/** SIDs used in the Windows commands. */
-export const SID = Object.freeze({ system: "*S-1-5-18", administrators: "*S-1-5-32-544", users: "*S-1-5-32-545" });
-
 /**
- * Windows: take over a chain of folders, top first. Administrators own each one and the entries
- * anyone else added are dropped (/reset; the owner is set first, so an inherited CREATOR OWNER entry
- * resolves to Administrators). A folder `protect` picks stops inheriting and grants SYSTEM and
- * Administrators full control and Users read, handed down to what is inside; the others take what
- * their parent hands down. One folder at a time, never /T: a recursive change can follow a junction
- * someone planted inside. /L: a link is changed itself, never what it points to.
+ * Windows: take over a chain of folders, top first, one at a time (Set-AdminFolder, in shell.ts):
+ * each is made if it is missing, Administrators own it, the entries anyone else added are dropped,
+ * and the result is checked before the next one. A folder `protect` picks stops inheriting. The
+ * folders above the first protected one keep what their parent hands down, so Users may still add
+ * to them, as ProgramData lets everyone do; the check allows that there and nowhere else.
  */
 export function windowsFolderCommands(chain: readonly string[], protect: (dir: string) => boolean): string[] {
-  return chain.flatMap((dir) => {
-    const d = psQuote(dir);
-    return [
-      `icacls ${d} /setowner '${SID.administrators}' /L /C`,
-      `icacls ${d} /reset /L /C`,
-      ...(protect(dir) ? [`icacls ${d} /inheritance:r /grant:r '${SID.system}:(OI)(CI)F' '${SID.administrators}:(OI)(CI)F' '${SID.users}:(OI)(CI)RX' /L /C`] : []),
-    ];
-  });
-}
-
-/**
- * Windows: the PowerShell that writes the text in `variable` to `file`. It refuses when a folder in
- * `chain` or the file itself is a junction or symbolic link, since the write would land wherever the
- * link leads. A file already there is deleted first, not overwritten: whoever made it may still hold
- * it open, and an open handle keeps its access through an overwrite and an ACL change. It is one line,
- * so a refusal or a failed delete stops the write even when the commands are pasted one line at a
- * time.
- */
-export function windowsCheckedWrite(file: string, chain: readonly string[], variable: string): string {
-  const paths = [...chain, file].map(psQuote).join(", ");
-  return (
-    `foreach ($p in @(${paths})) { if ((Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue).Attributes -band [IO.FileAttributes]::ReparsePoint) ` +
-    `{ throw "$p is a junction or symbolic link, so nothing was written. Remove the link (not what it points to) and run these commands again." } }; ` +
-    `if (Test-Path -LiteralPath ${psQuote(file)} -PathType Leaf) { Remove-Item -LiteralPath ${psQuote(file)} -Force -ErrorAction Stop }; ` +
-    `[System.IO.File]::WriteAllText(${psQuote(file)}, ${variable})`
-  );
+  const first = chain.findIndex(protect);
+  return chain.map((dir, i) => `Set-AdminFolder ${psQuote(dir)}${protect(dir) ? " -Protect" : first > i ? " -UsersMayCreate" : ""}`);
 }
 
 export function starterPolicy(server: string): Record<string, unknown> {
@@ -78,7 +50,7 @@ export function posixPolicyCommands(root: string, server: string, text: string, 
     `sudo install -d -m 0755 -o 0 -g 0 ${shQuote(root)} ${shQuote(dir)}`,
     `sudo chown 0:0 ${shQuote(root)} ${shQuote(dir)}`,
     `sudo chmod 0755 ${shQuote(root)} ${shQuote(dir)}`,
-    `sudo tee ${shQuote(file)} > /dev/null <<'EOF'\n${text}EOF`,
+    shHereDoc(`sudo tee ${shQuote(file)} > /dev/null`, text),
     `sudo chown 0:0 ${shQuote(file)}`,
     `sudo chmod 0644 ${shQuote(file)}`,
   ];
@@ -90,20 +62,17 @@ export function posixPolicyCommands(root: string, server: string, text: string, 
  * folders), and the folder and file below it inherit only SYSTEM and Administrators full control
  * plus Users read. NightSquawk keeps what ProgramData hands down, so other software can keep its own
  * folders there. The folders are taken over before the file is written, so nobody else can change
- * them in between.
+ * them in between. adminCommands() makes this one block, which stops at the first step that fails.
  */
 export function windowsPolicyCommands(root: string, server: string, text: string, fileName = "policy.json"): string[] {
   const parent = win32.dirname(root);
   const dir = win32.join(root, server);
   const file = win32.join(dir, fileName);
-  const chain = [parent, root, dir];
   return [
-    `New-Item -ItemType Directory -Force -Path ${psQuote(dir)} | Out-Null`,
-    ...windowsFolderCommands(chain, (d) => d === root),
-    `$policy = @'\n${text}'@`,
-    windowsCheckedWrite(file, chain, "$policy"),
-    `icacls ${psQuote(file)} /setowner '${SID.administrators}' /L /C`,
-    `icacls ${psQuote(file)} /reset /L /C`,
+    ...windowsFolderCommands([parent, root, dir], (d) => d === root),
+    psHereString("policy", text),
+    `Write-NewFile ${psQuote(file)} $policy`,
+    `Set-AdminFile ${psQuote(file)}`,
     `icacls ${psQuote(file)}`,
   ];
 }

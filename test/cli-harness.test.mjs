@@ -599,31 +599,16 @@ test("windows: PowerShell commands for an admin-owned file, and where each clien
   const top = "C:\\Program Files\\ClaudeCode";
   const sd = `${top}\\managed-settings.d`;
   const dropIn = `${sd}\\50-mcp-guard-toy.json`;
-  const owner = (p) => [`icacls '${p}' /setowner '*S-1-5-32-544' /L /C`, `icacls '${p}' /reset /L /C`];
-  const fileAcl = [...owner(dropIn), `icacls '${dropIn}' /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' '*S-1-5-32-545:RX' /L /C`];
-  const write = (chain) =>
-    `foreach ($p in @(${[...chain, dropIn].map((p) => `'${p}'`).join(", ")})) { if ((Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue).Attributes -band [IO.FileAttributes]::ReparsePoint) ` +
-    `{ throw "$p is a junction or symbolic link, so nothing was written. Remove the link (not what it points to) and run these commands again." } }; ` +
-    `if (Test-Path -LiteralPath '${dropIn}' -PathType Leaf) { Remove-Item -LiteralPath '${dropIn}' -Force -ErrorAction Stop }; ` +
-    `[System.IO.File]::WriteAllText('${dropIn}', $content)`;
   // The client's folder and each one below it are taken over, top first, before the file is written.
-  assert.deepEqual(adminFileCommands("win32", dropIn, text, top), [
-    `New-Item -ItemType Directory -Force -Path '${sd}' | Out-Null`,
-    ...owner(top),
-    `icacls '${top}' /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /L /C`,
-    ...owner(sd),
-    `$content = @'\n${text}'@`,
-    write([top, sd]),
-    ...fileAcl,
-  ]);
-  // An admin-chosen path (a watch baseline) has no client folder to take over; links are still refused.
-  assert.deepEqual(adminFileCommands("win32", dropIn, text), [`New-Item -ItemType Directory -Force -Path '${sd}' | Out-Null`, `$content = @'\n${text}'@`, write([]), ...fileAcl]);
-  assert.ok(!adminFileCommands("win32", dropIn, text, top).some((c) => /\/T\b/.test(c)), "never recursive: /T can follow a junction planted inside");
-  assert.deepEqual(adminFileCommands("win32", "C:\\ProgramData\\Cursor\\hooks.json", text, "c:\\programdata\\cursor").slice(1, 4), [
-    "icacls 'C:\\ProgramData\\Cursor' /setowner '*S-1-5-32-544' /L /C",
-    "icacls 'C:\\ProgramData\\Cursor' /reset /L /C",
-    "icacls 'C:\\ProgramData\\Cursor' /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /L /C",
-  ], "the top folder is matched case-insensitively");
+  const tail = [`$content = @'\n${text}'@`, `Write-NewFile '${dropIn}' $content`, `Set-AdminFile '${dropIn}' -Protect`];
+  assert.deepEqual(adminFileCommands("win32", dropIn, text, top), [`Set-AdminFolder '${top}' -Protect`, `Set-AdminFolder '${sd}'`, ...tail]);
+  // An admin-chosen path (a watch baseline) has no client folder to take over; a link at the file is still refused.
+  assert.deepEqual(adminFileCommands("win32", dropIn, text), [`New-Item -ItemType Directory -Force -Path '${sd}' | Out-Null`, ...tail]);
+  assert.deepEqual(
+    adminFileCommands("win32", "C:\\ProgramData\\Cursor\\hooks.json", text, "c:\\programdata\\cursor")[0],
+    "Set-AdminFolder 'C:\\ProgramData\\Cursor' -Protect",
+    "the top folder is matched case-insensitively"
+  );
   assert.throws(() => adminFileCommands("win32", dropIn, text, "D:\\Elsewhere"), /is not inside D:\\Elsewhere/);
   assert.deepEqual(adminFileCommands("linux", "/etc/cursor/hooks.json", text), [
     "sudo install -d -m 0755 -o 0 -g 0 '/etc/cursor'",

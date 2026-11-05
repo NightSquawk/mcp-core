@@ -29,10 +29,15 @@ the guard's inputs, or closes a path around the server.
 
 `mcp-guard` never writes client config and never elevates. For admin-owned files it prints the
 commands (exit code 3) and you run them yourself, in your own terminal, after reading them. On
-Windows, where any user may create folders in ProgramData, the commands first make Administrators
-own the client's folder (`%ProgramData%\Cursor`, `C:\Program Files\ClaudeCode`) and each folder below
-it, and write nothing through a junction or symbolic link. A file already there is deleted and
-written again: whoever made it may still hold it open.
+Windows they are one PowerShell block, which stops at the first step that fails, so no file is
+written unless every step before it worked. Any user may create folders in ProgramData, so the block
+first takes over the client's folder (`%ProgramData%\Cursor`, `C:\Program Files\ClaudeCode`) and
+each folder below it, top first. It creates each folder that is missing and makes Administrators its
+owner. Then it checks that nobody else can change, delete or take over that folder before it goes on
+to the next. It refuses a junction or symbolic link. A file already there is deleted and written
+again, because whoever made it may still hold it open. Run the block in an elevated PowerShell
+started with `-NoProfile`. The agent's user can edit your profile script when it is your own account,
+and an elevated PowerShell runs that script as admin.
 **Never run `sudo mcp-guard`** or an elevated `mcp-guard`: it reports what the user running it
 can do, so as root it checks root's view, and files it writes into a state folder become root's.
 It warns when it runs as root.
@@ -98,13 +103,15 @@ mcp-guard init <server> --print   # the policy only
 `init` prints the commands and exits 3. Read them, then run them in your own terminal.
 - **Linux:** they create root-owned folders (0755) and the file (0644) through `sudo tee`. Edit
   the policy later with `sudoedit`: your editor runs as you, and sudo writes the file as root.
-- **Windows (UNVERIFIED):** they first take over the folders, one at a time with `icacls`:
-  Administrators own `NightSquawk`, the policy root and the server's folder. The policy root stops
-  inheriting from ProgramData (where Users may create folders): only SYSTEM and Administrators get
-  full control, and Users read. `NightSquawk` keeps ProgramData's permissions, for other software's
-  folders. Then they write the file, and write nothing if one of those folders or the file is a
-  junction or symbolic link. They never change a folder's contents recursively: that could follow a
-  junction planted inside. Edit the policy from an elevated editor.
+- **Windows (UNVERIFIED):** one PowerShell block, which stops at the first step that fails. It
+  first takes over the folders, one at a time with `icacls`, top first: Administrators own
+  `NightSquawk`, the policy root and the server's folder. The policy root stops inheriting from
+  ProgramData (where Users may create folders): only SYSTEM and Administrators get full control, and
+  Users read. `NightSquawk` keeps ProgramData's permissions, for other software's folders, so Users
+  may still add to it but not change, rename or delete what is there. After each folder the block
+  checks its owner and who else may change it, and it stops at a junction or symbolic link. Only then
+  does it write the file. It never changes a folder's contents recursively, because that could follow
+  a junction planted inside. Edit the policy from an elevated editor.
 
 Paste the commands as printed. A path holding a typographic single quote (`‘ ’ ‚ ‛`) is quoted for
 PowerShell, which treats those as quote characters too. A chat client or word processor that
