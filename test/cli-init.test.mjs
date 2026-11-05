@@ -64,7 +64,7 @@ test("standard paths on Linux: exit 3 with sudo tee commands, nothing written", 
 
   const text = await cli(["init", SERVER], { env: {}, platform: "linux" });
   assert.equal(text.code, 3);
-  assert.match(text.text, new RegExp(`sudo tee '${target.replace(/[/.]/g, "\\$&")}' > /dev/null <<'EOF'`));
+  assert.ok(text.text.includes(`sudo tee '${target}' > /dev/null <<'EOF'`), text.text);
   // The heredoc body is the policy, and its terminator starts its own line.
   const lines = text.out;
   const start = lines.findIndex((l) => l.startsWith("sudo tee "));
