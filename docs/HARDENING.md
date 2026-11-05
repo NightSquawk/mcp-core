@@ -188,6 +188,14 @@ A sudo ticket belongs to a terminal, or, where there is none, to the parent proc
   agent's later commands can share its parent process.
 - Run `sudo -k` when you finish admin work.
 
+**sudo rules the check cannot list.** The check finds a NOPASSWD rule for a single command (`tee`,
+`vim`, `systemctl` and many others reach root) through `sudo -n -l`. With sudo's default
+`listpw=any`, that lists the user's rules without a password exactly when one of them is NOPASSWD,
+so a refused listing means there is none. With `Defaults listpw=always`, or `listpw=all` and rules
+of both kinds, sudo refuses the listing anyway, and the check cannot tell that apart: an
+unprivileged user cannot read the sudoers files. So never set `listpw` to `always` or `all` for the
+agent's user, or set `Defaults:<user> listpw=never` so its own rules can always be listed.
+
 **Paths to admin that the check cannot see.** The agent's user must not be able to read any of
 these. List them for each machine during install:
 - SSH keys, or keys in a reachable agent, that log in as root or an admin account, including

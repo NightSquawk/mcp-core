@@ -390,6 +390,9 @@ export function posixPart2(probes: ProtectionProbes): ProtectionPart {
     }
     // "sudo -n true" only covers ALL-style rules. With the default listpw=any, "sudo -n -l" lists the
     // rules without a password exactly when one of them is NOPASSWD (tee, vim, systemctl, ... reach root).
+    // A refused listing is not read as unknown: it is what every user without a NOPASSWD rule gets,
+    // a user who may use sudo with a password included. listpw=always (or all, with rules of both
+    // kinds) refuses it too and so hides a narrow NOPASSWD rule; HARDENING.md says not to set that.
     const l = probes.run("sudo", ["-n", "-l"]);
     if (l.status === 0) {
       const nopw = l.stdout.split(/\r?\n/).map((x) => x.trim()).filter((x) => /\bNOPASSWD\s*:/.test(x));
