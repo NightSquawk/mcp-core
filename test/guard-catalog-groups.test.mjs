@@ -163,6 +163,33 @@ describe("render functions", () => {
     assert.equal(refused.isError, true);
   });
 
+  test("an error or answer that cannot be serialized is left out, never a throw", () => {
+    const LEFT_OUT = { message: "The provider's error could not be serialized as JSON, so it is left out." };
+    for (const error of [{ code: 10n }, { toJSON: () => { throw new Error("no"); } }]) {
+      const failed = renderExecute({ status: "failed", operation: "x", idempotency_key: "k", http_status: 422, error, message: "The provider rejected the request; nothing was done." });
+      assert.equal(failed.isError, true);
+      assert.deepEqual(JSON.parse(failed.content[0].text), { failed: true, operation_id: "x", idempotency_key: "k", status: 422, error: LEFT_OUT, message: "The provider rejected the request; nothing was done." });
+      const unknown = JSON.parse(renderExecute({ status: "unknown_outcome", operation: "x", idempotency_key: "k", error, message: "m" }).content[0].text);
+      assert.equal(unknown.unknown_outcome, true);
+      assert.equal(unknown.idempotency_key, "k", "the key a retry needs is kept");
+      assert.deepEqual(unknown.error, LEFT_OUT);
+      assert.deepEqual(JSON.parse(renderRead({ status: "failed", operation: "x", http_status: 500, error }).content[0].text), { operation_id: "x", status: 500, error: LEFT_OUT });
+    }
+    const done = renderExecute({ status: "done", operation: "x", idempotency_key: "k", provider_ids: ["obj_1"], data: { n: 10n } });
+    assert.equal(done.isError, undefined, "the action happened: not an error");
+    assert.deepEqual(JSON.parse(done.content[0].text), {
+      operation_id: "x",
+      status: null,
+      idempotency_key: "k",
+      provider_ids: ["obj_1"],
+      result_truncated: true,
+      message: "Done. The provider's answer could not be serialized as JSON; read the object back with the read tool.",
+    });
+    const preview = renderExecute({ status: "dry_run", preview: { request: { n: 10n } } });
+    assert.equal(preview.isError, true);
+    assert.deepEqual(JSON.parse(preview.content[0].text), { error: { message: "The result could not be serialized as JSON, so it is not returned." } });
+  });
+
   test("an oversized deduplicated result is cut like the others, never refused", () => {
     const out = { status: "deduplicated", operation: "x", idempotency_key: "k", original: { status: "done", at: "2026-11-04T10:00:00.000Z", http_status: 200, provider_ids: ["obj_1"], data: { blob: "x".repeat(1000) } }, message: "This exact request already ran." };
     const cut = renderExecute(out, 300);

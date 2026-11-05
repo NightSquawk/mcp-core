@@ -420,6 +420,21 @@ describe("step 5: idempotency and dry_run", () => {
     assert.equal(held.guard.idempotency.entries()[0].status, "pending");
   });
 
+  test("a provider error that cannot be serialized is left out, and the call is still settled", async (t) => {
+    const { guard } = mk(t);
+    const odd = { toJSON: () => { throw new Error(`cannot encode ${SECRET}`); } };
+    const rejected = await exec(guard, "thing_create", { body: { a: 1 } }, { handler: stub(() => ({ ok: false, status: 422, error: odd, sent: true })) });
+    assert.equal(rejected.status, "failed");
+    assert.match(rejected.error.message, /^The provider's error could not be processed \(cannot encode .*\), so it is left out\.$/);
+    assert.ok(!JSON.stringify(rejected).includes(SECRET), "the reason is redacted");
+    assert.equal(guard.idempotency.entries()[0].status, "failed");
+    assert.equal(lines(guard).at(-1).decision, "failed");
+    const lost = await exec(guard, "thing_create", { body: { a: 2 } }, { handler: stub(() => ({ ok: false, status: 502, error: { code: 10n }, sent: true })) });
+    assert.equal(lost.status, "unknown_outcome");
+    assert.match(lost.error.message, /could not be processed \(.*BigInt.*\)/);
+    assert.doesNotThrow(() => renderExecute(lost));
+  });
+
   test("after sending, a ledger or kill switch that cannot be written is a note, never an error", async (t) => {
     const { guard } = mk(t);
     guard.ledger.settle = () => {
@@ -996,6 +1011,12 @@ describe("read path, taint and provenance (7.9)", () => {
     assert.match(thrown.error.message, /could not be processed \(cannot encode /);
     assert.ok(!JSON.stringify(thrown).includes(SECRET), "the reason is redacted");
     assert.ok(!JSON.stringify(lines(guard)).includes(SECRET));
+
+    const failed = await read(guard, "thing_list", {}, { handler: stub(() => ({ ok: false, status: 500, error: odd, sent: true })) });
+    assert.equal(failed.status, "failed", "a failed read whose error cannot be serialized fails with a note in its place");
+    assert.match(failed.error.message, /^The provider's error could not be processed \(cannot encode .*\), so it is left out\.$/);
+    assert.ok(!JSON.stringify(failed).includes(SECRET));
+    assert.doesNotThrow(() => renderRead(failed));
   });
 });
 

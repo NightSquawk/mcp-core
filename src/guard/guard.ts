@@ -377,6 +377,21 @@ export class Guard<P extends BasePolicy = BasePolicy> {
     return this.redactValue(redactSensitiveKeys(value, this.#keyRule()));
   }
 
+  /**
+   * A provider's error as the guard returns it: redacted, or a note in its place when it cannot be
+   * redacted or serialized as JSON (a bigint, a toJSON that throws). Never throws, so a failed call
+   * is still settled and audited.
+   */
+  #outError(raw: unknown): unknown {
+    try {
+      const error = this.#redactOut(raw);
+      JSON.stringify(error);
+      return error;
+    } catch (e) {
+      return { message: `The provider's error could not be processed (${this.redact(String((e as Error)?.message ?? e))}), so it is left out.` };
+    }
+  }
+
   /** #redactOut() plus the request-only names: for a request the guard shows or stores. */
   #redactRequest<T>(request: T): T {
     const rule = this.#keyRule();
@@ -985,7 +1000,7 @@ export class Guard<P extends BasePolicy = BasePolicy> {
 
     // 9. Audit (and settle).
     if (!res.ok) {
-      const error = this.#redactOut(res.error);
+      const error = this.#outError(res.error);
       if (rejected) {
         const stateNote = [this.#finish(key, "failed", { http_status: res.status ?? null }), this.#settle(reservation.id, "failed")].filter(Boolean).join(" ");
         this.#write({ ...base, decision: "failed", http_status: res.status ?? null, duration_ms, ...(stateNote ? { note: stateNote } : {}) });
@@ -1243,7 +1258,7 @@ export class Guard<P extends BasePolicy = BasePolicy> {
     if (reservation) this.#settle(reservation.id, res.ok ? "done" : "failed");
     if (!res.ok) {
       if (auditReads) this.#write({ ...base, decision: "failed", http_status: res.status ?? null });
-      return { status: "failed", operation: op.operationId, ...(res.status !== undefined ? { http_status: res.status } : {}), error: this.#redactOut(res.error) };
+      return { status: "failed", operation: op.operationId, ...(res.status !== undefined ? { http_status: res.status } : {}), error: this.#outError(res.error) };
     }
 
     // Untrusted content (7.9): label, sanitize, taint, provenance. An answer that cannot be

@@ -64,8 +64,32 @@ export interface CatalogGroupsResult {
   manifest: () => GuardManifest;
 }
 
+/** JSON text of a payload, or null when it cannot be serialized (a bigint, a toJSON that throws, a cycle). */
+function serialize(payload: unknown): string | null {
+  try {
+    return JSON.stringify(payload);
+  } catch {
+    return null;
+  }
+}
+
+const UNSERIALIZABLE = { message: "The result could not be serialized as JSON, so it is not returned." };
+
+/** A tool result holding the payload as JSON. A payload that cannot be serialized gives an error result, never a throw. */
 function text(payload: unknown, isError = false): CallToolResult {
-  return { content: [{ type: "text", text: JSON.stringify(payload) }], ...(isError ? { isError: true } : {}) };
+  const s = serialize(payload);
+  if (s === null) return { content: [{ type: "text", text: JSON.stringify({ error: UNSERIALIZABLE }) }], isError: true };
+  return { content: [{ type: "text", text: s }], ...(isError ? { isError: true } : {}) };
+}
+
+/** A provider's error as given, or a note in its place when it cannot be serialized as JSON. */
+function errorOf(error: unknown): unknown {
+  return serialize(error) === null ? { message: "The provider's error could not be serialized as JSON, so it is left out." } : error;
+}
+
+/** Why an answer is left out of a result: it was too long, or it cannot be serialized. */
+function leftOut(what: string, s: string | null): string {
+  return `${what} ${s === null ? "could not be serialized as JSON" : `was ${s.length} characters, too long to return`}; read the object back with the read tool.`;
 }
 
 function defaultDescription<P extends BasePolicy>(guard: Guard<P>, group: Group): { title: string; description: string } {
@@ -170,20 +194,16 @@ function untrustedPart(fields: number | undefined, whole: boolean | undefined): 
 /** Render a read outcome (C1 shape: {operation_id, status, result}). */
 export function renderRead(out: ReadOutcome, maxChars = DEFAULT_MAX_RESULT_CHARS): CallToolResult {
   if (out.status === "refused") return text(out.refusal, true);
-  if (out.status === "failed") return text({ operation_id: out.operation, status: out.http_status ?? null, error: out.error }, true);
+  if (out.status === "failed") return text({ operation_id: out.operation, status: out.http_status ?? null, error: errorOf(out.error) }, true);
   const payload = {
     operation_id: out.operation,
     status: out.http_status ?? null,
     ...untrustedPart(out.untrusted_fields, out.untrusted_whole),
     result: out.data,
   };
-  let s: string;
-  try {
-    s = JSON.stringify(payload);
-  } catch {
-    // Guard.read already fails such a read; this covers an outcome built some other way.
-    return text({ operation_id: out.operation, status: out.http_status ?? null, error: { message: "The result could not be serialized as JSON, so it is not returned." } }, true);
-  }
+  const s = serialize(payload);
+  // Guard.read already fails such a read; this covers an outcome built some other way.
+  if (s === null) return text({ operation_id: out.operation, status: out.http_status ?? null, error: UNSERIALIZABLE }, true);
   if (s.length > maxChars) return text(tooLarge(s.length, maxChars), true);
   return { content: [{ type: "text", text: s }] };
 }
@@ -197,14 +217,14 @@ export function renderExecute(out: ExecuteOutcome, maxChars = DEFAULT_MAX_RESULT
       return text({ dry_run: true, ...out.preview });
     case "deduplicated": {
       const payload = { deduplicated: true, operation_id: out.operation, idempotency_key: out.idempotency_key, original: out.original, message: out.message };
-      const s = JSON.stringify(payload);
-      if (s.length <= maxChars) return { content: [{ type: "text", text: s }] };
+      const s = serialize(payload);
+      if (s !== null && s.length <= maxChars) return { content: [{ type: "text", text: s }] };
       // The original call already happened and nothing new was sent: never refuse here, only shorten.
       return text({
         ...payload,
         original: { ...out.original, data: undefined },
         result_truncated: true,
-        message: `${out.message} The original answer was ${s.length} characters, too long to return; read the object back with the read tool.`,
+        message: `${out.message} ${leftOut("The original answer", s)}`,
       });
     }
     case "pending": {
@@ -216,19 +236,19 @@ export function renderExecute(out: ExecuteOutcome, maxChars = DEFAULT_MAX_RESULT
         provider_ids: out.provider_ids,
         hold: out.hold,
       };
-      const s = JSON.stringify({ ...held, message: out.message, ...untrustedPart(out.untrusted_fields, out.untrusted_whole), result: out.data });
-      if (s.length <= maxChars) return { content: [{ type: "text", text: s }] };
+      const s = serialize({ ...held, message: out.message, ...untrustedPart(out.untrusted_fields, out.untrusted_whole), result: out.data });
+      if (s !== null && s.length <= maxChars) return { content: [{ type: "text", text: s }] };
       // The provider already holds the action: never refuse here, only shorten.
       return text({
         ...held,
         result_truncated: true,
-        message: [out.message, `The provider's answer was ${s.length} characters, too long to return; read the object back with the read tool.`].filter(Boolean).join(" "),
+        message: [out.message, leftOut("The provider's answer", s)].filter(Boolean).join(" "),
       });
     }
     case "failed":
-      return text({ failed: true, operation_id: out.operation, idempotency_key: out.idempotency_key, status: out.http_status ?? null, error: out.error, message: out.message }, true);
+      return text({ failed: true, operation_id: out.operation, idempotency_key: out.idempotency_key, status: out.http_status ?? null, error: errorOf(out.error), message: out.message }, true);
     case "unknown_outcome":
-      return text({ unknown_outcome: true, operation_id: out.operation, idempotency_key: out.idempotency_key, status: out.http_status ?? null, error: out.error, message: out.message }, true);
+      return text({ unknown_outcome: true, operation_id: out.operation, idempotency_key: out.idempotency_key, status: out.http_status ?? null, error: errorOf(out.error), message: out.message }, true);
     case "done": {
       const payload = {
         operation_id: out.operation,
@@ -239,8 +259,8 @@ export function renderExecute(out: ExecuteOutcome, maxChars = DEFAULT_MAX_RESULT
         ...untrustedPart(out.untrusted_fields, out.untrusted_whole),
         result: out.data,
       };
-      const s = JSON.stringify(payload);
-      if (s.length <= maxChars) return { content: [{ type: "text", text: s }] };
+      const s = serialize(payload);
+      if (s !== null && s.length <= maxChars) return { content: [{ type: "text", text: s }] };
       // The action already happened: never refuse here, only shorten.
       return text({
         operation_id: out.operation,
@@ -249,7 +269,7 @@ export function renderExecute(out: ExecuteOutcome, maxChars = DEFAULT_MAX_RESULT
         provider_ids: out.provider_ids,
         ...(out.warnings ? { warnings: out.warnings } : {}),
         result_truncated: true,
-        message: `Done. The provider's answer was ${s.length} characters, too long to return; read the object back with the read tool.`,
+        message: `Done. ${leftOut("The provider's answer", s)}`,
       });
     }
   }
