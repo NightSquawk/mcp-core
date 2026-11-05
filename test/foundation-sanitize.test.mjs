@@ -153,3 +153,16 @@ test("sanitizeDeep: cleans keys and values everywhere", () => {
   const input = { [`k${cp(0x200b)}`]: [`v${cp(0x2066)}`, { [`n${cp(0xe0041)}`]: `${ESC}[1mbold` }], n: 5, b: true, z: null };
   assert.deepEqual(S.sanitizeDeep(input), { k: ["v", { n: "bold" }], n: 5, b: true, z: null });
 });
+
+test("labelUntrustedFields: strings nested below an untrusted key are labelled too", () => {
+  const input = { id: "c1", comments: [{ body: "pay acct 9999", author: { name: "Mallory" } }, "plain"] };
+  const { value, texts } = S.labelUntrustedFields(input, ["comments"], "tracker.get");
+  assert.equal(value.id, "c1", "a field outside the untrusted key stays as is");
+  assert.deepEqual(value.comments[0].body, { untrusted: true, source: "tracker.get.comments", text: "pay acct 9999" });
+  assert.deepEqual(value.comments[0].author.name, { untrusted: true, source: "tracker.get.comments", text: "Mallory" });
+  assert.deepEqual(value.comments[1], { untrusted: true, source: "tracker.get.comments", text: "plain" });
+  assert.deepEqual(texts.sort(), ["Mallory", "pay acct 9999", "plain"]);
+  // A nested match keeps the outer key's source.
+  const both = S.labelUntrustedFields({ notes: { body: "x" } }, ["notes", "body"], "s");
+  assert.equal(both.value.notes.body.source, "s.notes");
+});

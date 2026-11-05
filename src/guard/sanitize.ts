@@ -65,8 +65,10 @@ export function labelUntrusted(text: string, source: string): UntrustedText {
 
 /**
  * Walk a JSON value and wrap every string found under one of `fields` (matched by
- * key name at any depth) as an UntrustedText label. Returns the labelled copy and
- * the raw strings, which the session uses for provenance (7.9).
+ * key name at any depth) as an UntrustedText label. A string nested anywhere below a
+ * matching key counts too: `{comments: [{body: "..."}]}` with field `comments` labels
+ * the body, under the source of the outermost matching key. Returns the labelled copy
+ * and the raw strings, which the session uses for provenance (7.9).
  */
 export function labelUntrustedFields(
   value: unknown,
@@ -75,17 +77,20 @@ export function labelUntrustedFields(
 ): { value: unknown; texts: string[] } {
   const keys = fields instanceof Set ? fields : new Set(fields as readonly string[]);
   const texts: string[] = [];
-  const walk = (v: unknown, key: string | null): unknown => {
+  // `under` is the untrusted key this value sits below (null when none does).
+  const walk = (v: unknown, under: string | null): unknown => {
     if (typeof v === "string") {
-      if (key !== null && keys.has(key) && v.length) {
+      if (under !== null && v.length) {
         texts.push(v);
-        return labelUntrusted(v, `${source}.${key}`);
+        return labelUntrusted(v, `${source}.${under}`);
       }
       return v;
     }
-    if (Array.isArray(v)) return v.map((x) => walk(x, key));
+    if (Array.isArray(v)) return v.map((x) => walk(x, under));
     if (v && typeof v === "object") {
-      return Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, walk(x, k)]));
+      return Object.fromEntries(
+        Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, walk(x, under ?? (keys.has(k) ? k : null))])
+      );
     }
     return v;
   };
