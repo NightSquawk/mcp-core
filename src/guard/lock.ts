@@ -27,7 +27,16 @@ export function withFileLock<T>(lockPath: string, fn: () => T, opts: { timeoutMs
       fd = openSync(lockPath, "wx", 0o600);
       writeSync(fd, `${process.pid} ${new Date().toISOString()}\n`);
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === "EPERM" && process.platform === "win32") {
+        // Windows refuses to create a file that another process is still deleting, and Node reports
+        // that as EPERM: the lock is busy, not broken. If it stays that way, the EPERM is the answer.
+        if (Date.now() > deadline) throw e;
+        sleepSync(wait);
+        wait = Math.min(wait * 2, 100);
+        continue;
+      }
+      if (code !== "EEXIST") throw e;
       try {
         const age = Date.now() - statSync(lockPath).mtimeMs;
         if (age > staleMs) {
