@@ -819,19 +819,23 @@ export class Guard<P extends BasePolicy = BasePolicy> {
       };
     };
 
-    if (existing && !input.dryRun) {
-      if (existing.status === "done" || existing.status === "pending") return dedup(existing);
+    // A request that is running, or whose outcome is unknown at a provider without an idempotency
+    // key, blocks an identical one. A dry run is refused the same way (the entry is left as it is),
+    // so it never reports as executable a call that would be refused here.
+    if (existing) {
       if (existing.status === "in_flight") return this.#refused(base, refuse("in_flight", "The same request is running right now in this or another session."));
       if (existing.status === "unknown" && !op.idempotencyKey) {
         return this.#refused(base, refuse("outcome_unknown", `An identical request at ${existing.created_at} has an unknown outcome and the provider has no idempotency key, so a retry could run it twice.`, {
           how_to_enable: `Check with ${this.toolName("read")} whether it happened. If it did not, a human runs mcp-guard cancel ${key.slice(-12)} to allow a retry.`,
         }));
       }
+      if (!input.dryRun && (existing.status === "done" || existing.status === "pending")) return dedup(existing);
     }
 
     // dry_run stops here: no approver contact, nothing recorded.
     if (input.dryRun) {
       const proposal = buildProposal({ server: this.server, operation: op, group, mode: this.mode, extraction, client, requestHash, idempotencyKey: key, policyHash: this.loaded.hash, reason: input.reason, now });
+      const duplicate = existing && (existing.status === "done" || existing.status === "pending") ? existing : null;
       const effect =
         approver.name === "none"
           ? "Runs immediately; the harness rules for this tool still apply."
@@ -852,11 +856,14 @@ export class Guard<P extends BasePolicy = BasePolicy> {
         client,
         approval: { approver: approver.name, effect },
         idempotency_key: key,
-        ...(existing && (existing.status === "done" || existing.status === "pending")
-          ? { duplicate_of: { status: existing.status, at: existing.finished_at ?? existing.created_at, provider_ids: existing.result?.provider_ids } }
-          : {}),
+        ...(duplicate ? { duplicate_of: { status: duplicate.status, at: duplicate.finished_at ?? duplicate.created_at, provider_ids: duplicate.result?.provider_ids } } : {}),
         approval_text: proposalText(proposal, (t) => this.#redactor(t, this.#secrets())),
-        note: "Dry run: every check passed and nothing was sent. Run again without dry_run to execute.",
+        // The note says what the same call without dry_run does, so a preview never promises a run that will not happen.
+        note: duplicate
+          ? `Dry run: every check passed and nothing was sent. This exact request already ran at ${duplicate.finished_at ?? duplicate.created_at} (${duplicate.status}): without dry_run, the original result is returned and nothing new is sent. A genuinely new call must differ in a body field.`
+          : approver.name === "deny"
+            ? "Dry run: nothing was sent. This group's approver is deny, so without dry_run the call is refused."
+            : "Dry run: every check passed and nothing was sent. Run again without dry_run to execute.",
       };
       this.#write({ ...base, decision: "dry_run" });
       return { status: "dry_run", preview };

@@ -320,8 +320,10 @@ describe("step 5: idempotency and dry_run", () => {
     assert.equal(h.calls.length, 0);
     assert.equal(code(await exec(guard, "payment_create", pay(20000), { dryRun: true })), "over_per_call", "dry_run still refuses");
     await exec(guard, "payment_create", pay(), { handler: h });
+    assert.equal(d.preview.note, "Dry run: every check passed and nothing was sent. Run again without dry_run to execute.");
     const d2 = await exec(guard, "payment_create", pay(), { dryRun: true, handler: h });
     assert.equal(d2.preview.duplicate_of.status, "done");
+    assert.match(d2.preview.note, /already ran at \S+ \(done\): without dry_run, the original result is returned and nothing new is sent/, "the note says what the call would do");
     assert.equal(lines(guard).filter((l) => l.decision === "dry_run").length, 2);
   });
 
@@ -360,6 +362,39 @@ describe("step 5: idempotency and dry_run", () => {
     const p2 = await exec(guard, "payment_create", pay(), { handler: ok });
     assert.equal(p2.status, "done");
     assert.equal(ok.calls[0].ctx.idempotencyKey, p1.idempotency_key);
+  });
+
+  test("a dry run is refused like the call while an identical one is in flight or has an unknown outcome, and leaves the entry alone", async (t) => {
+    const { guard } = mk(t);
+    let release;
+    const gate = new Promise((r) => (release = r));
+    const slow = stub(async () => {
+      await gate;
+      return undefined;
+    });
+    const first = exec(guard, "thing_create", { body: { a: 1 } }, { handler: slow });
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(code(await exec(guard, "thing_create", { body: { a: 1 } }, { dryRun: true })), "in_flight", "not a preview that says it would run");
+    release();
+    assert.equal((await first).status, "done");
+
+    const boom = stub(() => ({ ok: false, status: 502, error: { message: "bad gateway" }, sent: true }));
+    assert.equal((await exec(guard, "thing_create", { body: { b: 1 } }, { handler: boom })).status, "unknown_outcome");
+    const before = JSON.stringify(guard.idempotency.entries());
+    const d = await exec(guard, "thing_create", { body: { b: 1 } }, { dryRun: true });
+    assert.equal(code(d), "outcome_unknown");
+    assert.match(d.refusal.how_to_enable, /mcp-guard cancel/);
+    assert.equal(JSON.stringify(guard.idempotency.entries()), before, "the unknown entry is left as it was");
+    assert.equal(code(await exec(guard, "thing_create", { body: { b: 1 } })), "outcome_unknown", "as the call itself is");
+    assert.deepEqual(lines(guard).filter((l) => l.dry_run && l.decision === "refused").map((l) => l.reason_code), ["in_flight", "outcome_unknown"]);
+
+    // Where the provider takes the key, the retry reuses it, and the dry run says it runs.
+    const p1 = await exec(guard, "payment_create", pay(), { handler: boom });
+    assert.equal(p1.status, "unknown_outcome");
+    const pd = await exec(guard, "payment_create", pay(), { dryRun: true });
+    assert.equal(pd.status, "dry_run");
+    assert.equal(pd.preview.idempotency_key, p1.idempotency_key);
+    assert.equal(pd.preview.duplicate_of, undefined);
   });
 
   test("a provider-keyed retry of an unknown call counts against the caps once", async (t) => {
@@ -669,6 +704,7 @@ describe("step 6: approval", () => {
     assert.equal(code(await exec(guard, "payment_create", pay(6000))), "approval_feature_unavailable");
     const d = await exec(guard, "payment_create", pay(2000, { description: "dry" }), { dryRun: true });
     assert.equal(d.preview.approval.approver, "deny");
+    assert.equal(d.preview.note, "Dry run: nothing was sent. This group's approver is deny, so without dry_run the call is refused.");
   });
 
   test("approval.fatigue fails closed for a call whose threshold approver asks a person", async (t) => {
