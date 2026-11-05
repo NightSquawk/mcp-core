@@ -128,11 +128,15 @@ describe("computeEffective", () => {
     assert.equal(eff(t, { policy: { ...ALL_ON, approval: { ...ALL_ON.approval, spend: "external", fatigue: {} } } }).groups.spend.enabled, true, "an empty fatigue block sets no limit");
   });
 
-  test("a remote kill flag fails closed until G5", (t) => {
+  test("G5 features (a remote kill flag, audit forwarding) fail closed", (t) => {
     const remote = eff(t, { policy: { ...ALL_ON, kill_switch: { remote_flag: "https://example.test/flag" } } });
     assert.deepEqual(codes(remote), { read: "on", change: "remote_kill_flag_unavailable", critical: "remote_kill_flag_unavailable", spend: "remote_kill_flag_unavailable" });
     assert.match(remote.groups.change.reason, /^kill_switch\.remote_flag arrives with G5/);
     assert.equal(eff(t, { policy: { ...ALL_ON, kill_switch: { remote_flag: "none" } } }).groups.change.enabled, true);
+    const forward = eff(t, { policy: { ...ALL_ON, audit: { forward: "datadog" } } });
+    assert.deepEqual(codes(forward), { read: "on", change: "audit_forward_unavailable", critical: "audit_forward_unavailable", spend: "audit_forward_unavailable" });
+    assert.match(forward.groups.spend.reason, /^audit\.forward "datadog" arrives with G5, so no audit line leaves this machine/);
+    assert.equal(eff(t, { policy: { ...ALL_ON, audit: { forward: "none", reads: true } } }).groups.change.enabled, true);
   });
 
   test("tiers_off and sandbox-only tiers", (t) => {

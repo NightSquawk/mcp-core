@@ -188,6 +188,12 @@ export function computeEffective<P extends BasePolicy>(input: EffectiveInput<P>)
         `kill_switch.remote_flag arrives with G5, so this version cannot see a remote stop; the ${group} group stays off rather than run without it.`,
         `Set kill_switch.remote_flag to "none" in ${loaded.path} (admin rights) to run ${group} without a remote flag.`
       );
+    } else if (group !== "read" && policy.audit.forward !== "none") {
+      state = off(
+        "audit_forward_unavailable",
+        `audit.forward "${policy.audit.forward}" arrives with G5, so no audit line leaves this machine; the ${group} group stays off rather than run without it.`,
+        `Set audit.forward to "none" in ${loaded.path} (admin rights) to run ${group} with only the local audit log.`
+      );
     } else if (group !== "read" && HUMAN_APPROVERS.includes(cfg.approver) && fatigueLimits(policy).length) {
       state = off(
         "approval_feature_unavailable",

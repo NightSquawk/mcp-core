@@ -94,6 +94,7 @@ export const approvalSchema = z
   })
   .strict();
 
+// forward: anything but "none" keeps every non-read group off until G5 forwards lines (effective.ts).
 export const auditSchema = z
   .object({ forward: z.enum(["none", "datadog"]).default("none"), reads: z.boolean().default(false) })
   .strict();
