@@ -54,6 +54,9 @@ by what the call can do, not by its HTTP method. A non-GET read needs a `read_re
     normal, such as starting a machine, stopping it and starting it again. When the provider takes
     one (`idempotencyKey`), an identical call returns the first call's result for three days, the
     time the guard keeps it; a genuine repeat must differ in a body field, such as the description.
+    Identical means the same operation and request, in the same mode and for the same client: a
+    sandbox call never answers a live one, nor one client's call another's, though they share the
+    server's state.
 - **Catalog servers:** `registerCatalogGroups(server, { guard, operations, resolve, handler, extract, ... })`
   registers list/describe plus one tool per group (`<prefix>_read`, `<prefix>_change`, ...). It
   also registers `guard://manifest` and `guard://status`.

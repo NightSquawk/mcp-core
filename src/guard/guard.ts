@@ -716,7 +716,9 @@ export class Guard<P extends BasePolicy = BasePolicy> {
     const today = utcDay(now);
     const maxLength = this.#opts.idempotencyMaxLength ?? 255;
     const windowMs = this.#opts.idempotencyWindowMs ?? 10 * 60_000;
-    const keyFor = (day: string) => deriveKey({ server: this.server, operation: op.operationId, canonicalBody, proposalDay: day, maxLength });
+    // The mode and client are part of the call: a sandbox result never answers a live call, nor one
+    // client's another's, though they share this server's store.
+    const keyFor = (day: string) => deriveKey({ server: this.server, operation: op.operationId, canonicalBody, proposalDay: day, mode: this.mode, client, maxLength });
     const keyToday = keyFor(today);
     // The key of today and of every earlier day the store still holds, newest first. A call whose
     // outcome is unknown, or that the provider holds, blocks an identical retry (or lends it its

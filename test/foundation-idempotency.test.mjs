@@ -13,9 +13,13 @@ test("deriveKey: deterministic, prefixed, and sensitive to every input", () => {
   const k = I.deriveKey(input());
   assert.match(k, /^nst-column-[0-9a-f]{64}$/);
   assert.equal(I.deriveKey(input()), k);
-  for (const over of [{ server: "proxmox" }, { operation: "wire_create" }, { canonicalBody: '{"body":{"amount":101}}' }, { proposalDay: "2026-11-05" }]) {
+  for (const over of [{ server: "proxmox" }, { operation: "wire_create" }, { canonicalBody: '{"body":{"amount":101}}' }, { proposalDay: "2026-11-05" }, { mode: "live" }, { mode: "sandbox" }, { client: "acme" }]) {
     assert.notEqual(I.deriveKey(input(over)), k, JSON.stringify(over));
   }
+  assert.equal(I.deriveKey(input({ mode: "none", client: null })), k, "absent mode and client are none and no client");
+  assert.notEqual(I.deriveKey(input({ mode: "live", client: "acme" })), I.deriveKey(input({ mode: "live", client: "globex" })));
+  assert.notEqual(I.deriveKey(input({ client: null })), I.deriveKey(input({ client: "null" })));
+  assert.notEqual(I.deriveKey(input({ mode: "live", client: "x" })), I.deriveKey(input({ mode: 'live","client":"x' })), "a value cannot fake the other field");
   // Field boundaries are unambiguous: moving text between fields changes the key.
   assert.notEqual(I.deriveKey(input({ server: "a", operation: "b\nc" })), I.deriveKey(input({ server: "a\nb", operation: "c" })));
 });

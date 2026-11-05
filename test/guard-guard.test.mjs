@@ -287,6 +287,24 @@ describe("step 5: idempotency and dry_run", () => {
     assert.notEqual(c.idempotency_key, a.idempotency_key);
   });
 
+  test("the same request in sandbox and then live, or for two clients, is two calls: neither is answered from the other's result", async (t) => {
+    // One server's state, as when its credentials are switched, or a server acts for several clients.
+    const sb = sandbox(t);
+    sb.writePolicy(ALL_ON);
+    const guardFor = (mode, client) =>
+      createGuard({ server: "toy", version: "1.0.0", env: sb.env, mode, protection: staticProtection(true, sb.policyPath), stateDir: sb.stateDir, log: () => {}, ...(client ? { defaultClient: () => client } : {}) });
+    const h = stub();
+    // payment_create takes the provider's idempotency key, so a done call answers an identical one for three days.
+    assert.equal(code(await exec(guardFor("sandbox"), "payment_create", pay(100), { handler: h })), "done");
+    assert.equal(code(await exec(guardFor("live"), "payment_create", pay(100), { handler: h })), "done", "the live call is sent, not answered from the sandbox one");
+    assert.equal(code(await exec(guardFor("live"), "payment_create", pay(100), { handler: h })), "deduplicated", "an identical live call still is");
+    assert.equal(code(await exec(guardFor("live", "acme"), "payment_create", pay(100), { handler: h })), "done");
+    assert.equal(code(await exec(guardFor("live", "globex"), "payment_create", pay(100), { handler: h })), "done", "another client's identical call is sent");
+    assert.equal(code(await exec(guardFor("live", "globex"), "payment_create", pay(100), { handler: h })), "deduplicated");
+    assert.equal(h.calls.length, 4);
+    assert.equal(new Set(h.calls.map((c) => c.ctx.idempotencyKey)).size, 4, "each call went out under its own key");
+  });
+
   test("dry_run checks everything, records nothing and shows a duplicate", async (t) => {
     const asked = [];
     const spy = { name: "none", human: false, request: async (p) => (asked.push(p), { result: "approved", approver: "none", human: false }) };

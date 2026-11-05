@@ -14,6 +14,13 @@ export interface DeriveKeyInput {
   canonicalBody: string;
   /** The day the proposal was created (YYYY-MM-DD, UTC). */
   proposalDay: string;
+  /**
+   * The credentials' mode and the client the call acts for (absent: "none" and no client). Both
+   * share the server's state, but the same request in sandbox and then live, or for two clients,
+   * is two calls: the stored result of one must never answer the other.
+   */
+  mode?: string;
+  client?: string | null;
   /** Provider limit (Column: 255). */
   maxLength?: number;
 }
@@ -24,7 +31,9 @@ export const MIN_KEY_DIGEST_HEX = 24;
 export const MIN_KEY_LENGTH = 32;
 
 export function deriveKey(input: DeriveKeyInput): string {
-  const digest = sha256Hex(`nst-mcp-guard/v1\n${input.server}\n${input.operation}\n${input.proposalDay}\n${input.canonicalBody}`);
+  // Mode and client go in as one line of JSON, so neither can move text across a field boundary.
+  const context = JSON.stringify({ mode: input.mode ?? "none", client: input.client ?? null });
+  const digest = sha256Hex(`nst-mcp-guard/v2\n${input.server}\n${input.operation}\n${input.proposalDay}\n${context}\n${input.canonicalBody}`);
   const max = Math.max(16, input.maxLength ?? 255);
   const key = `nst-${input.server}-${digest}`;
   if (key.length <= max) return key;
