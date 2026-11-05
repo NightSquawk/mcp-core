@@ -195,8 +195,18 @@ export function renderExecute(out: ExecuteOutcome, maxChars = DEFAULT_MAX_RESULT
       return text(out.refusal, true);
     case "dry_run":
       return text({ dry_run: true, ...out.preview });
-    case "deduplicated":
-      return text({ deduplicated: true, operation_id: out.operation, idempotency_key: out.idempotency_key, original: out.original, message: out.message });
+    case "deduplicated": {
+      const payload = { deduplicated: true, operation_id: out.operation, idempotency_key: out.idempotency_key, original: out.original, message: out.message };
+      const s = JSON.stringify(payload);
+      if (s.length <= maxChars) return { content: [{ type: "text", text: s }] };
+      // The original call already happened and nothing new was sent: never refuse here, only shorten.
+      return text({
+        ...payload,
+        original: { ...out.original, data: undefined },
+        result_truncated: true,
+        message: `${out.message} The original answer was ${s.length} characters, too long to return; read the object back with the read tool.`,
+      });
+    }
     case "pending": {
       const held = {
         pending: true,

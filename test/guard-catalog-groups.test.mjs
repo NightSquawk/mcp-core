@@ -163,6 +163,22 @@ describe("render functions", () => {
     assert.equal(refused.isError, true);
   });
 
+  test("an oversized deduplicated result is cut like the others, never refused", () => {
+    const out = { status: "deduplicated", operation: "x", idempotency_key: "k", original: { status: "done", at: "2026-11-04T10:00:00.000Z", http_status: 200, provider_ids: ["obj_1"], data: { blob: "x".repeat(1000) } }, message: "This exact request already ran." };
+    const cut = renderExecute(out, 300);
+    assert.equal(cut.isError, undefined);
+    const { message, ...rest } = JSON.parse(cut.content[0].text);
+    assert.deepEqual(rest, {
+      deduplicated: true,
+      operation_id: "x",
+      idempotency_key: "k",
+      original: { status: "done", at: "2026-11-04T10:00:00.000Z", http_status: 200, provider_ids: ["obj_1"] },
+      result_truncated: true,
+    });
+    assert.match(message, /^This exact request already ran\. The original answer was \d+ characters, too long to return; read the object back with the read tool\.$/);
+    assert.deepEqual(JSON.parse(renderExecute(out, 5000).content[0].text).original.data, out.original.data, "under the cap the original answer is kept");
+  });
+
   test("an oversized pending result is cut, never refused: the provider already holds the action", () => {
     const out = { status: "pending", operation: "x", idempotency_key: "k", http_status: 202, provider_ids: ["obj_1"], hold: { ref: "r" }, message: "Held by the provider.", data: { blob: "x".repeat(1000) }, untrusted_whole: true };
     const cut = renderExecute(out, 300);
