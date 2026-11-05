@@ -417,25 +417,46 @@ test("the owner probe reads what this user may do: allow entries for its SIDs th
   const sub = join(dir, "sub");
   writeFileSync(file, "{}\n");
   mkdirSync(sub);
-  const me = powershell("[Security.Principal.WindowsIdentity]::GetCurrent().User.Value").stdout.trim();
+  // The SIDs the probe matches entries against, found the way it finds them: the user, then its enabled groups.
+  const token = powershell("$i = [Security.Principal.WindowsIdentity]::GetCurrent(); (@($i.User.Value) + @($i.Groups | ForEach-Object { $_.Value })) -join ' '")
+    .stdout.trim()
+    .split(/\s+/);
+  const [me] = token;
   assert.match(me, /^S-1-5-/);
+  t.diagnostic(`token: ${token.join(" ")}`);
+  const BACKUP_OPERATORS = "S-1-5-32-551";
+  assert.ok(!token.includes(BACKUP_OPERATORS), `the test needs an account outside Backup Operators: ${token.join(" ")}`);
   const rightsOf = (...paths) => {
     const owners = realProbes().windowsOwners(paths);
     assert.ok(owners, "the probe answered");
     return paths.map((p) => owners.find((o) => o.path.toLowerCase() === p.toLowerCase())?.rights);
   };
+  /** Replace the DACL with exactly this SDDL, so no inherited or leftover entry is in play. */
+  const setDacl = (path, sddl) => {
+    const r = powershell(["$ErrorActionPreference = 'Stop'", `$a = Get-Acl -LiteralPath ${psQuote(path)}`, `$a.SetSecurityDescriptorSddlForm(${psQuote(sddl)}, 'Access')`, `Set-Acl -LiteralPath ${psQuote(path)} -AclObject $a`].join("\n"));
+    assert.equal(r.status, 0, `${sddl} on ${path}: ${r.stderr || r.stdout}`);
+  };
+  /** Fails with the token and both DACLs, read only when the check fails. */
+  const check = (ok, what) => {
+    if (!ok) assert.fail(`${what}. Token ${token.join(" ")}; ${file}: ${acl(file).rules.join(", ")}; ${sub}: ${acl(sub).rules.join(", ")}`);
+  };
   const [inherited] = rightsOf(file);
-  assert.ok(inherited & WINDOWS_CHANGE_RIGHTS.WRITE_DAC, `a file in this user's temp folder gives it full control: ${inherited}`);
+  check(inherited & WINDOWS_CHANGE_RIGHTS.WRITE_DAC, `a file in this user's temp folder gives it full control, read ${inherited}`);
   try {
-    icacls(file, "/inheritance:r", "/grant:r", "*S-1-5-18:F");
-    icacls(sub, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F");
-    // Inherit-only: it applies to what sub holds, not to sub.
-    icacls(sub, "/grant", `*${me}:(OI)(CI)(IO)F`);
-    assert.deepEqual(rightsOf(file, sub), [0, 0], "only SYSTEM is named, and an inherit-only entry does not count");
-    icacls(file, "/grant", `*${me}:(WDAC)`);
+    // Only Backup Operators on the file. On sub, also this user, inherit-only: it applies to what sub holds, not to sub.
+    setDacl(file, "D:P(A;;FA;;;BO)");
+    setDacl(sub, `D:P(A;OICI;FA;;;BO)(A;OICIIO;FA;;;${me})`);
+    assert.deepEqual(acl(file).rules, [`${BACKUP_OPERATORS} Allow FullControl inherited=False`]);
+    const none = rightsOf(file, sub);
+    check(none[0] === 0 && none[1] === 0, `read ${JSON.stringify(none)}, not [0,0], where no entry for this user applies`);
+    // A lone WRITE_DAC entry for this user is read as that, without write.
+    setDacl(file, `D:P(A;;FA;;;BO)(A;;WD;;;${me})`);
     const [dac] = rightsOf(file);
-    assert.ok(dac & WINDOWS_CHANGE_RIGHTS.WRITE_DAC, `WRITE_DAC: ${dac}`);
-    assert.equal(dac & WINDOWS_CHANGE_RIGHTS.FILE_WRITE_DATA, 0, "and no write");
+    check(dac & WINDOWS_CHANGE_RIGHTS.WRITE_DAC && !(dac & WINDOWS_CHANGE_RIGHTS.FILE_WRITE_DATA), `read ${dac} for WRITE_DAC alone`);
+    // An entry for one of its groups counts as well: Everyone.
+    setDacl(file, "D:P(A;;FA;;;BO)(A;;FA;;;WD)");
+    const [everyone] = rightsOf(file);
+    check(everyone & WINDOWS_CHANGE_RIGHTS.WRITE_DAC, `read ${everyone} for Everyone full control`);
   } finally {
     icacls(file, "/reset");
     icacls(sub, "/reset");
