@@ -9,7 +9,7 @@ export * from "./secret.js";
 export * from "./sanitize.js";
 export * from "./paths.js";
 export * from "./canonical.js";
-export { withFileLock, readJsonFile, writeJsonFile, LockTimeoutError } from "./lock.js";
+export { withFileLock, readJsonFile, writeJsonFile, LockTimeoutError, type LockOptions } from "./lock.js";
 export * from "./policy.js";
 export * from "./protection.js";
 export * from "./audit.js";
