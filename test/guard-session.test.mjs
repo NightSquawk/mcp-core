@@ -79,6 +79,23 @@ describe("SessionState", () => {
     assert.equal(s.lockedClient, "A");
   });
 
+  test("a held client pin is lifted unless a call for that client may have acted", () => {
+    const s = new SessionState();
+    assert.equal(s.holdClient("A"), true);
+    assert.equal(s.holdClient("B"), false, "another client is refused while A's call is in flight");
+    assert.equal(s.holdClient("A"), true);
+    s.releaseClient("A", false);
+    assert.equal(s.lockedClient, "A", "one of A's calls is still in flight");
+    s.releaseClient("A", false);
+    assert.equal(s.lockedClient, null, "neither call acted");
+    assert.equal(s.holdClient("B"), true);
+    s.releaseClient("B", true);
+    assert.equal(s.lockedClient, "B", "B's call may have acted: pinned for good");
+    assert.equal(s.holdClient("A"), false);
+    s.releaseClient("A", true);
+    assert.equal(s.lockedClient, "B", "a release for a client that holds nothing changes nothing");
+  });
+
   test("ids are random", () => {
     assert.notEqual(new SessionState().id, new SessionState().id);
   });

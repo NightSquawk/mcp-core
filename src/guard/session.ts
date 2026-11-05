@@ -79,6 +79,8 @@ export class SessionState {
   readonly #trusted = new Set<string>();
   readonly #untrusted = new Map<string, string>();
   #client: string | null = null;
+  #clientHolds = 0;
+  #clientActed = false;
 
   constructor(id: string = nonce().slice(0, 16)) {
     this.id = id;
@@ -137,12 +139,30 @@ export class SessionState {
     return this.untrustedToken(value)?.source ?? null;
   }
 
-  /** Pin non-read calls to one client (7.11). Returns false if another client is already pinned. */
+  /** Pin non-read calls to one client (7.11) for good. Returns false if another client is already pinned. */
   lockClient(client: string): boolean {
-    if (this.#client === null) {
-      this.#client = client;
-      return true;
-    }
-    return this.#client === client;
+    if (!this.holdClient(client)) return false;
+    this.releaseClient(client, true);
+    return true;
+  }
+
+  /**
+   * Hold the pin for a call about to be sent: calls for any other client are refused while it is
+   * held. Returns false if another client holds the pin. releaseClient() says whether the call may
+   * have acted for the client; the pin stays for good once one did, and is lifted when no call for
+   * the client is in flight and none acted (all rejected or never sent).
+   */
+  holdClient(client: string): boolean {
+    if (this.#client !== null && this.#client !== client) return false;
+    this.#client = client;
+    this.#clientHolds++;
+    return true;
+  }
+
+  releaseClient(client: string, acted: boolean): void {
+    if (this.#client !== client || this.#clientHolds === 0) return;
+    this.#clientHolds--;
+    if (acted) this.#clientActed = true;
+    if (this.#clientHolds === 0 && !this.#clientActed) this.#client = null;
   }
 }

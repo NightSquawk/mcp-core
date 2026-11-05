@@ -964,7 +964,10 @@ export class Guard<P extends BasePolicy = BasePolicy> {
       this.#settle(reservation.id, unsent);
       return this.#refused(base, refuse("approval_expired", `The proposal expired at ${proposal.expires_at} before the call could be sent. Nothing was sent; ask again.`));
     }
-    if (this.policy.client_scope?.lock_per_session && client !== null && !this.session.lockClient(client)) {
+    // The session is held for this client while the call runs, and stays pinned to it only if the
+    // provider may have acted (7.11): a call refused or never sent does not pin it.
+    const pin = this.policy.client_scope?.lock_per_session && client !== null ? client : null;
+    if (pin !== null && !this.session.holdClient(pin)) {
       release();
       this.#settle(reservation.id, unsent);
       return this.#refused(base, refuse("client_locked", `This session is pinned to ${this.session.lockedClient}.`));
@@ -977,10 +980,11 @@ export class Guard<P extends BasePolicy = BasePolicy> {
       res = { ok: false, error: { message: this.redact(String((e as Error)?.message ?? e)) }, sent: true };
     }
     const duration_ms = this.#clock().getTime() - started;
+    const rejected = !res.ok && (!res.sent || (res.status !== undefined && res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 409));
+    if (pin !== null) this.session.releaseClient(pin, !rejected);
 
     // 9. Audit (and settle).
     if (!res.ok) {
-      const rejected = !res.sent || (res.status !== undefined && res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 409);
       const error = this.#redactOut(res.error);
       if (rejected) {
         const stateNote = [this.#finish(key, "failed", { http_status: res.status ?? null }), this.#settle(reservation.id, "failed")].filter(Boolean).join(" ");

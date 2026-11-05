@@ -196,6 +196,20 @@ describe("step 4: argument checks", () => {
     assert.equal(code(await exec(guard, "payment_create", pay(100, { client: "B" }))), "client_locked");
   });
 
+  test("the client lock stays only once a call may have acted for that client", async (t) => {
+    const { guard } = mk(t, { policy: { ...ALL_ON, client_scope: { allowed: ["A", "B"], lock_per_session: true } } });
+    const unsent = stub(() => ({ ok: false, error: { message: "no route" }, sent: false }));
+    assert.equal(code(await exec(guard, "payment_create", pay(100, { client: "A" }), { handler: unsent })), "failed");
+    assert.equal(guard.session.lockedClient, null, "nothing was sent for A");
+    const rejected = stub(() => ({ ok: false, status: 422, error: { message: "invalid" }, sent: true }));
+    assert.equal(code(await exec(guard, "payment_create", pay(100, { client: "A", description: "r" }), { handler: rejected })), "failed");
+    assert.equal(guard.session.lockedClient, null, "the provider rejected it, so nothing was done for A");
+    const lost = stub(() => ({ ok: false, status: 502, error: { message: "bad gateway" }, sent: true }));
+    assert.equal(code(await exec(guard, "payment_create", pay(100, { client: "B", description: "u" }), { handler: lost })), "unknown_outcome");
+    assert.equal(guard.session.lockedClient, "B", "the provider may have acted for B");
+    assert.equal(code(await exec(guard, "payment_create", pay(100, { client: "A", description: "a" }))), "client_locked");
+  });
+
   test("defaultClient fills a missing client", async (t) => {
     const { guard } = mk(t, { policy: { ...ALL_ON, client_scope: { allowed: ["NST-internal"], lock_per_session: false } }, guard: { defaultClient: () => "NST-internal" } });
     assert.equal(code(await exec(guard, "payment_create", pay(100))), "done");
