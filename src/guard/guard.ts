@@ -1285,9 +1285,13 @@ export class Guard<P extends BasePolicy = BasePolicy> {
     // A read that reached the provider counts against the read limits whatever it answered: one that
     // fails, sent again and again, is still traffic, and an error can still tell something. Only a
     // read that was never sent is released.
-    if (reservation) this.#settle(reservation.id, res.ok || res.sent ? "done" : "failed");
+    const counted = reservation !== null && (res.ok || res.sent);
+    if (reservation) this.#settle(reservation.id, counted ? "done" : "failed");
+    // A read the limits count is audited whatever audit.reads says (its status, never its data), so
+    // that a ledger rebuilt from the log counts it too.
+    const audit = auditReads || counted;
     if (!res.ok) {
-      if (auditReads) this.#write({ ...base, decision: "failed", http_status: res.status ?? null });
+      if (audit) this.#write({ ...base, decision: "failed", http_status: res.status ?? null, sent: res.sent });
       return { status: "failed", operation: op.operationId, ...(res.status !== undefined ? { http_status: res.status } : {}), error: this.#outError(res.error) };
     }
 
@@ -1300,10 +1304,10 @@ export class Guard<P extends BasePolicy = BasePolicy> {
       JSON.stringify(processed.data);
     } catch (e) {
       const message = `The provider answered, but its answer could not be processed (${this.redact(String((e as Error)?.message ?? e))}), so it is not returned.`;
-      if (auditReads) this.#write({ ...base, decision: "failed", http_status: res.status ?? null, note: message });
+      if (audit) this.#write({ ...base, decision: "failed", http_status: res.status ?? null, sent: true, note: message });
       return { status: "failed", operation: op.operationId, ...(res.status !== undefined ? { http_status: res.status } : {}), error: { message } };
     }
-    if (auditReads) this.#write({ ...base, decision: "read", http_status: res.status ?? null });
+    if (audit) this.#write({ ...base, decision: "read", http_status: res.status ?? null });
     return {
       status: "done",
       operation: op.operationId,

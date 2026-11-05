@@ -103,7 +103,11 @@ export class Ledger {
     return this.#audit ? this.#rebuild() : { version: 1, events: [] };
   }
 
-  /** Rebuild from the audit log: every executed, pending or unknown-outcome call, less the ones mcp-guard cancel released. */
+  /**
+   * Rebuild from the audit log: every executed, pending or unknown-outcome call, less the ones
+   * mcp-guard cancel released, and every read that reached the provider (the guard audits each
+   * read a read limit counts, whatever audit.reads says).
+   */
   #rebuild(): LedgerFile {
     const events: LedgerEvent[] = [];
     for (const l of this.#audit?.read() ?? []) {
@@ -117,7 +121,15 @@ export class Ledger {
       // read() already drops lines that are not audit lines; also skip ones with fields of the wrong type.
       if (typeof l.group !== "string" || l.dry_run || Number.isNaN(Date.parse(l.ts)) || typeof l.operation !== "string") continue;
       const status: LedgerStatus | null =
-        l.decision === "executed" ? "done" : l.decision === "pending" ? "pending" : l.decision === "unknown_outcome" ? "unknown" : null;
+        l.decision === "executed"
+          ? "done"
+          : l.decision === "pending"
+            ? "pending"
+            : l.decision === "unknown_outcome"
+              ? "unknown"
+              : l.group === "read" && (l.decision === "read" || (l.decision === "failed" && l.sent === true))
+                ? "done"
+                : null;
       if (!status) continue;
       // A retry under the same key (a provider that dedupes on it) is the same call: it replaces an
       // earlier attempt whose outcome was unknown, as reserve() does when it runs.

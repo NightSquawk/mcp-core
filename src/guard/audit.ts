@@ -55,6 +55,11 @@ export interface AuditEntry {
    * once and was written before this line.
    */
   cancelled_at?: string;
+  /**
+   * On a failed read: whether it reached the provider. One that did counts against the read limits,
+   * and a ledger rebuilt from the log counts it again.
+   */
+  sent?: boolean;
   note?: string;
   agent_says?: string;
 }

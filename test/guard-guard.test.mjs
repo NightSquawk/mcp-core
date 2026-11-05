@@ -1093,7 +1093,7 @@ describe("read path, taint and provenance (7.9)", () => {
     assert.ok(lines(guard).some((l) => l.alert === "canary_read"));
   });
 
-  test("reads are audited only when audit.reads is on; read rate limits apply", async (t) => {
+  test("reads are audited when audit.reads is on; read rate limits apply", async (t) => {
     const off = mk(t).guard;
     await read(off, "thing_list");
     assert.equal(lines(off).length, 0);
@@ -1118,6 +1118,26 @@ describe("read path, taint and provenance (7.9)", () => {
     const r = await read(guard, "thing_list", {}, { handler: down });
     assert.equal(code(r), "rate_limited", "three failed reads reached the provider: the limit is used up");
     assert.equal(down.calls.length, 1);
+  });
+
+  test("with a read limit, each read it counts is audited, so a ledger rebuilt from the log counts it again", async (t) => {
+    // audit.reads is off (the default).
+    const { guard } = mk(t, { policy: { ...ALL_ON, limits: { ...ALL_ON.limits, rate: { read_per_hour: 3 } } } });
+    const down = stub(() => ({ ok: false, status: 503, error: { message: "down" }, sent: true }));
+    const unsent = stub(() => ({ ok: false, error: { message: "not sent" }, sent: false }));
+    assert.equal((await read(guard, "thing_list")).status, "done");
+    assert.equal((await read(guard, "thing_list", {}, { handler: down })).status, "failed");
+    assert.equal((await read(guard, "thing_list", {}, { handler: unsent })).status, "failed");
+    assert.deepEqual(
+      lines(guard).map((l) => [l.decision, l.http_status, l.sent]),
+      [["read", 200, undefined], ["failed", 503, true]],
+      "the two reads the limit counts, not the one never sent"
+    );
+    assert.ok(lines(guard).every((l) => !("data" in l)), "no data in the log");
+    writeFileSync(guard.ledger.file, "{}");
+    assert.equal(guard.ledger.snapshot().count("read", "hour"), 2, "rebuilt from the audit log");
+    assert.equal((await read(guard, "thing_list")).status, "done");
+    assert.equal(code(await read(guard, "thing_list")), "rate_limited", "the window did not start over");
   });
 
   test("read failures are redacted", async (t) => {

@@ -79,7 +79,7 @@ This matters because once the loader lives in `node_modules/@nightsquawktech/mcp
 
 ### Guard entry: `@nightsquawktech/mcp-core/guard`
 
-The guard runs every tool call through one policy before the provider sees it. Each operation has a tier, and the tiers map to four groups: `read`, `change`, `critical` and `spend`. A machine policy that only an admin can write turns groups on and sets limits and approvers. The guard records every non-read call (and reads, if the policy asks) in a hash-chained audit log, counts calls in a daily ledger, and has a kill switch that stops everything but `read`.
+The guard runs every tool call through one policy before the provider sees it. Each operation has a tier, and the tiers map to four groups: `read`, `change`, `critical` and `spend`. A machine policy that only an admin can write turns groups on and sets limits and approvers. The guard records every non-read call (and reads, if the policy asks for them or limits them) in a hash-chained audit log, counts calls in a daily ledger, and has a kill switch that stops everything but `read`.
 
 - `createGuard(...)`, `registerCatalogGroups(...)` and `guard.toolConfig(group)`: create the guard and register the group tools with their annotations and `_meta`.
 - `buildManifest(...)`: the `dist/guard-manifest.json` that `mcp-guard harness` turns into client rules.

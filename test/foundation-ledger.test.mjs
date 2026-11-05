@@ -184,6 +184,24 @@ test("ledger: a retry under the key of an unknown-outcome call replaces it, in t
   assert.equal(l.snapshot().count("spend", "day"), 2);
 });
 
+test("ledger: a rebuild counts every read that reached the provider, answered or not", (t) => {
+  const dir = tempDir(t);
+  const clock = manualClock("2026-11-04T12:00:00.000Z");
+  const audit = new AuditLog(dir, "column", { clock });
+  const base = { server: "column", version: "t", guard: "t", session: "s", tool: "column_read", tier: "read", group: "read", mode: "live", dry_run: false, operation: "get" };
+  audit.append({ ...base, decision: "read", http_status: 200 });
+  audit.append({ ...base, decision: "failed", http_status: 503, sent: true });
+  audit.append({ ...base, decision: "failed", http_status: null, sent: false }); // never sent
+  audit.append({ ...base, decision: "failed", http_status: 500 }); // an older line that does not say
+  audit.append({ ...base, decision: "refused", reason_code: "rate_limited" });
+  audit.append({ ...base, decision: "alert", alert: "canary_read" });
+  clock.advance(30 * 60_000);
+  const s = new Ledger(dir, { clock, audit }).snapshot();
+  assert.equal(s.count("read", "hour"), 2);
+  assert.equal(s.count("read", "minute"), 0, "at the times they ran");
+  assert.equal(s.count("change", "day"), 0);
+});
+
 test("ledger: a rebuild counts an unknown-outcome call and its retry under the same key once", (t) => {
   const dir = tempDir(t);
   const clock = manualClock("2026-11-04T12:00:00.000Z");
