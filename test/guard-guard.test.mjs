@@ -397,6 +397,31 @@ describe("step 5: idempotency and dry_run", () => {
     assert.equal(pd.preview.duplicate_of, undefined);
   });
 
+  test("a provider-keyed retry of an unknown call adds its amount to the provider's total, which may or may not hold the first attempt", async (t) => {
+    let provider = 0;
+    const policy = { ...ALL_ON, limits: { spend: { ...ALL_ON.limits.spend, per_day: 1000 } } };
+    const { guard } = mk(t, { policy, guard: { providerTotals: async () => provider } });
+    const boom = stub(() => ({ ok: false, status: 502, error: { message: "bad gateway" }, sent: true }));
+    assert.equal((await exec(guard, "payment_create", pay(600), { handler: boom })).status, "unknown_outcome");
+    // The first attempt went through: the provider counts it. A call that never ran, plus 600 cents
+    // of other spend, would look the same, and then the retry would spend 600 more.
+    provider = 600;
+    const r = await exec(guard, "payment_create", pay(600));
+    assert.equal(code(r), "over_per_day");
+    assert.equal(r.refusal.details.today_cents, 600);
+    assert.match(r.refusal.message, /This retries an identical call whose outcome is unknown\. If that call went through, the provider's total already includes it/);
+    assert.match(r.refusal.how_to_enable, /^Check with toy_read whether the earlier call went through\. If it did, it needs no retry\.$/);
+    // Where the provider's total leaves room for the amount, the retry runs under the same key.
+    provider = 300;
+    const ok = stub();
+    assert.equal((await exec(guard, "payment_create", pay(600), { handler: ok })).status, "done");
+    assert.equal(ok.calls.length, 1);
+    // A refusal the ledger makes has no such note.
+    const other = await exec(guard, "payment_create", pay(600, { description: "another" }));
+    assert.equal(code(other), "over_per_day");
+    assert.equal(other.refusal.how_to_enable, undefined);
+  });
+
   test("a provider-keyed retry of an unknown call counts against the caps once", async (t) => {
     const policy = { ...ALL_ON, limits: { spend: { ...ALL_ON.limits.spend, per_day: 800 }, rate: { spend_per_day: 1 } } };
     const { guard } = mk(t, { policy });

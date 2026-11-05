@@ -586,17 +586,35 @@ export class Guard<P extends BasePolicy = BasePolicy> {
     return null;
   }
 
-  #spendRefusal(amount: number, currency: string, s: LedgerSnapshot, providerToday: number | null): Refusal | null {
+  /**
+   * `retrying`: this call retries, under the provider's idempotency key, an identical call whose
+   * outcome is unknown. The ledger leaves that attempt out, since the retry is counted in its place.
+   * The provider's total holds it only if it went through, and then the retry adds nothing; if it
+   * did not, the total leaves it out and the retry spends it now. The two cannot be told apart, so
+   * the amount is added to the provider's total either way: taking it off instead would let a call
+   * that never ran be retried past the cap by its whole amount.
+   */
+  #spendRefusal(amount: number, currency: string, s: LedgerSnapshot, providerToday: number | null, retrying = false): Refusal | null {
     const limits = this.policy.limits.spend!;
     if (limits.per_call !== undefined && amount > limits.per_call) {
       return refuse("over_per_call", `${amount} cents is over the policy's per-call cap of ${limits.per_call} cents.`, { details: { per_call: limits.per_call, amount_cents: amount } });
     }
     if (limits.per_day !== undefined) {
-      const today = Math.max(s.spendToday(currency), providerToday ?? 0);
+      const ledgerToday = s.spendToday(currency);
+      const today = Math.max(ledgerToday, providerToday ?? 0);
       if (today + amount > limits.per_day) {
-        return refuse("over_per_day", `Today's spend (${today} cents) plus ${amount} cents is over the daily cap of ${limits.per_day} cents.`, {
-          details: { per_day: limits.per_day, today_cents: today, amount_cents: amount },
-        });
+        const retry = retrying && providerToday !== null && providerToday > ledgerToday;
+        return refuse(
+          "over_per_day",
+          `Today's spend (${today} cents) plus ${amount} cents is over the daily cap of ${limits.per_day} cents.` +
+            (retry
+              ? " This retries an identical call whose outcome is unknown. If that call went through, the provider's total already includes it and the retry would add nothing, but the guard cannot tell, so it counts the amount again."
+              : ""),
+          {
+            details: { per_day: limits.per_day, today_cents: today, amount_cents: amount },
+            ...(retry ? { how_to_enable: `Check with ${this.toolName("read")} whether the earlier call went through. If it did, it needs no retry.` } : {}),
+          }
+        );
       }
     }
     return null;
@@ -749,7 +767,7 @@ export class Guard<P extends BasePolicy = BasePolicy> {
           return this.#refused(base, refuse("provider_totals_unavailable", `Could not read today's total from the provider (${this.redact(String((e as Error)?.message ?? e))}), so the daily cap cannot be checked.`));
         }
       }
-      const r = this.#spendRefusal(amount, limits.currency, this.ledger.snapshot({ replacing }), providerToday);
+      const r = this.#spendRefusal(amount, limits.currency, this.ledger.snapshot({ replacing }), providerToday, replacing !== undefined);
       if (r) return this.#refused(base, r);
     }
     const rate = this.#rateRefusal(group, this.ledger.snapshot({ replacing }));
@@ -970,7 +988,7 @@ export class Guard<P extends BasePolicy = BasePolicy> {
     try {
       reservation = this.ledger.reserve(
         { group, op: op.operationId, key, ...(typeof extraction.amount_cents === "number" ? { cents: extraction.amount_cents } : {}), ...(extraction.currency ? { currency: extraction.currency } : {}) },
-        (s) => (group === "spend" ? this.#spendRefusal(extraction.amount_cents as number, extraction.currency as string, s, providerToday) : null) ?? this.#rateRefusal(group, s),
+        (s) => (group === "spend" ? this.#spendRefusal(extraction.amount_cents as number, extraction.currency as string, s, providerToday, replacing !== undefined) : null) ?? this.#rateRefusal(group, s),
         { replacing }
       );
     } catch (e) {
