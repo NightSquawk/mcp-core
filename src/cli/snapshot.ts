@@ -10,7 +10,7 @@ import type { Mode } from "../guard/approvers.js";
 import { AuditLog, type ChainCheck } from "../guard/audit.js";
 import { computeEffective, readNarrowing, type Effective } from "../guard/effective.js";
 import { IdempotencyStateError, IdempotencyStore, type IdemEntry } from "../guard/idempotency.js";
-import { KillSwitch, type KillState } from "../guard/kill-switch.js";
+import { KillSwitch, type KillFileProblem, type KillState } from "../guard/kill-switch.js";
 import { Ledger } from "../guard/ledger.js";
 import { readJsonFile } from "../guard/lock.js";
 import { basePolicySchema, loadPolicy, type BasePolicy, type LoadedPolicy } from "../guard/policy.js";
@@ -43,7 +43,8 @@ export interface ServerSnapshot {
   serverSpecificKeys: string[];
   protection: ProtectionReport;
   effective: Partial<Record<Mode, Effective>>;
-  kill: KillState & { file: string; corrupt: boolean };
+  /** corrupt: kill.json cannot be used (problem says why), which stops every group until mcp-guard reset. */
+  kill: KillState & { file: string; corrupt: boolean; problem: KillFileProblem | null };
   ledger: LedgerView;
   idempotency: IdempotencyView;
   audit: ChainCheck[];
@@ -126,12 +127,7 @@ export function snapshotServer(ctx: ServerContext, io: CliIo, modes: readonly Mo
 
   const clock = io.clock;
   const ks = new KillSwitch({ markers: ctx.markers, stateDir: ctx.stateDir, clock });
-  let killCorrupt = false;
-  try {
-    readJsonFile(ks.file, { trips: [] });
-  } catch {
-    killCorrupt = true;
-  }
+  const killProblem = ks.fileProblem();
 
   const audit = new AuditLog(ctx.stateDir, ctx.server, { clock });
   const ledger = new Ledger(ctx.stateDir, { clock, audit });
@@ -161,7 +157,7 @@ export function snapshotServer(ctx: ServerContext, io: CliIo, modes: readonly Mo
     serverSpecificKeys,
     protection,
     effective,
-    kill: { ...ks.state(), file: ks.file, corrupt: killCorrupt },
+    kill: { ...ks.state(), file: ks.file, corrupt: killProblem !== null, problem: killProblem },
     ledger: { file: ledger.file, exists: existsSync(ledger.file), corrupt: ledgerCorrupt, spendToday, callsToday },
     idempotency,
     audit: audit.verifyAll(),

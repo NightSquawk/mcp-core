@@ -71,6 +71,20 @@ test("reset keeps a copy of an unreadable kill.json and replaces it", async (t) 
   assert.match(r.asked[0], /replace the unreadable .*kill\.json \(a copy is kept as .*kill\.json\.corrupt-/);
 });
 
+test("reset keeps a copy of a kill.json that is JSON but not a list of trips, and replaces it", async (t) => {
+  const sb = sandbox(t);
+  const dir = sb.serverState("column");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "kill.json"), '{"trips":"corrupt"}');
+  const r = await cli(["reset", "column", "--json"], { env: sb.env, interactive: true, answers: ["column"] });
+  assert.equal(r.code, 0);
+  assert.equal(r.json.kill_file_replaced, true);
+  assert.equal(readFileSync(join(dir, `kill.json.corrupt-${STAMP}`), "utf8"), '{"trips":"corrupt"}');
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, "kill.json"), "utf8")), { trips: [] });
+  assert.match(r.asked[0], /replace the malformed .*kill\.json \(a copy is kept as .*kill\.json\.corrupt-/);
+  assert.match(auditLines(sb, "column").at(-1).note, /replaced a malformed kill\.json/);
+});
+
 test("reset moves an unreadable idempotency store aside, with a warning to check the provider", async (t) => {
   const sb = sandbox(t);
   const dir = sb.serverState("column");

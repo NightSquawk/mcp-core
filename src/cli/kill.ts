@@ -14,7 +14,6 @@ import { AuditLog, type AuditEntry } from "../guard/audit.js";
 import { IdempotencyStateError, IdempotencyStore, type IdemEntry } from "../guard/idempotency.js";
 import { KillSwitch } from "../guard/kill-switch.js";
 import { Ledger } from "../guard/ledger.js";
-import { readJsonFile } from "../guard/lock.js";
 import { hasUnsafePathChar } from "../guard/protection.js";
 import { GUARD_VERSION } from "../guard/version.js";
 import { fileStamp, knownServers, pathLib, requireServer, serverContext, type ServerContext } from "./context.js";
@@ -184,12 +183,9 @@ export async function resetCommand(args: { server?: string }, io: CliIo): Promis
   const server = requireServer(args.server, "reset");
   const ctx = serverContext(server, io);
   const ks = new KillSwitch({ markers: ctx.markers, stateDir: ctx.stateDir, clock: io.clock });
-  let killCorrupt = false;
-  try {
-    readJsonFile(ks.file, { trips: [] });
-  } catch {
-    killCorrupt = true;
-  }
+  // Not JSON, or JSON but not a list of trips: either way it stops every group, and reset keeps a copy.
+  const killProblem = ks.fileProblem();
+  const killCorrupt = killProblem !== null;
   const trips = killCorrupt ? [] : ks.state().trips;
   const store = new IdempotencyStore(ctx.stateDir, { clock: io.clock });
   let idemBroken: IdempotencyStateError | null = null;
@@ -214,7 +210,7 @@ export async function resetCommand(args: { server?: string }, io: CliIo): Promis
 
   const plan: string[] = [];
   for (const t of trips) plan.push(`clear the automatic trip (${t.scope}) from ${t.at}: ${t.reason}`);
-  if (killCorrupt) plan.push(`replace the unreadable ${ks.file} (a copy is kept as ${ks.file}.corrupt-${stamp})`);
+  if (killCorrupt) plan.push(`replace the ${killProblem} ${ks.file} (a copy is kept as ${ks.file}.corrupt-${stamp})`);
   if (idemBroken) {
     plan.push(
       `move the unreadable idempotency store aside to ${idemBroken.file}.corrupt-${stamp}. Every call it recorded can then run again if retried: check the provider for each before retrying anything.`
@@ -229,7 +225,7 @@ export async function resetCommand(args: { server?: string }, io: CliIo): Promis
     movedTo = `${idemBroken.file}.corrupt-${stamp}`;
     renameSync(idemBroken.file, movedTo);
   }
-  const note = `cleared ${cleared} trip(s)${killCorrupt ? "; replaced an unreadable kill.json" : ""}${movedTo ? `; moved the idempotency store aside to ${movedTo}` : ""}`;
+  const note = `cleared ${cleared} trip(s)${killCorrupt ? `; replaced ${killProblem === "unreadable" ? "an unreadable" : "a malformed"} kill.json` : ""}${movedTo ? `; moved the idempotency store aside to ${movedTo}` : ""}`;
   const warning = cliAlert(io, ctx, "reset", note);
   return {
     code: EXIT.ok,

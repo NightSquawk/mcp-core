@@ -97,6 +97,36 @@ test("kill switch: an unreadable trip file stops everything until reset", (t) =>
   assert.equal(ks.stopped("spend"), null);
 });
 
+test("kill switch: JSON that is not a list of trips stops everything until reset", (t) => {
+  const { ks, root } = setup(t);
+  assert.equal(ks.fileProblem(), null, "no file is no trips");
+  mkdirSync(join(root, "state"), { recursive: true });
+  const shapes = [
+    "{}",
+    '{"trips":"corrupt"}',
+    "[]",
+    "null",
+    "7",
+    '{"trips":[null]}',
+    '{"trips":[{"scope":"spend"}]}',
+    '{"trips":[{"scope":"everything","reason":"x","at":"y"}]}',
+  ];
+  for (const text of shapes) {
+    writeFileSync(ks.file, text);
+    assert.equal(ks.fileProblem(), "malformed", text);
+    for (const g of CHANGING) assert.match(ks.stopped(g), /Automatic trip \(all\).*is not a list of trips/, `${text} ${g}`);
+    assert.equal(ks.stopped("read"), null, "reads are never stopped");
+  }
+  ks.trip("change", "new trip on a malformed file");
+  assert.equal(ks.fileProblem(), null);
+  assert.match(ks.stopped("spend"), /is not a list of trips/, "tripping again keeps the fail-closed trip");
+  writeFileSync(ks.file, "{corrupt");
+  assert.equal(ks.fileProblem(), "unreadable");
+  ks.reset();
+  assert.equal(ks.fileProblem(), null);
+  assert.equal(ks.stopped("spend"), null);
+});
+
 test("kill switch: trips from 5 processes at once are all kept", async (t) => {
   const { root, markers } = setup(t);
   const code = `

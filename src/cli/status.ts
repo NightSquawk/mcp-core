@@ -80,7 +80,7 @@ function serverText(snap: ServerSnapshot, warnings: string[], notes: string[]): 
 
   const manual = kill.manual.all ? `set for every server (${kill.manual.markers.all})` : kill.manual.server ? `set (${kill.manual.markers.server})` : "not set";
   out.push(`kill switch: ${manual}${kill.manual.note ? `; note: ${kill.manual.note}` : ""}`);
-  if (kill.corrupt) out.push(`  ${kill.file} is unreadable, which stops every group: mcp-guard reset ${ctx.server} after checking why`);
+  if (kill.problem) out.push(`  ${kill.file} is ${kill.problem}, which stops every group: mcp-guard reset ${ctx.server} after checking why`);
   else for (const t of kill.trips) out.push(`  automatic trip (${t.scope}) at ${t.at}: ${t.reason}`);
 
   const spend = Object.entries(ledger.spendToday);
@@ -147,7 +147,7 @@ function statusOne(args: StatusArgs, io: CliIo): Outcome {
     },
     protection,
     effective: snap.effective,
-    kill: { manual: kill.manual, trips: kill.trips, corrupt: kill.corrupt, file: kill.file },
+    kill: { manual: kill.manual, trips: kill.trips, corrupt: kill.corrupt, problem: kill.problem, file: kill.file },
     today: { calls: ledger.callsToday, spend_cents: ledger.spendToday, ledger_corrupt: ledger.corrupt },
     idempotency: idempotency.ok
       ? {

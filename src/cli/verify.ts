@@ -135,7 +135,7 @@ export function verifyCommand(args: VerifyArgs, io: CliIo): Outcome {
   });
   add("effective", "pass", `groups on per mode (server env and server checks can only narrow this): ${summary.join("; ")}`);
 
-  if (kill.corrupt) add("kill", "fail", `${kill.file} is unreadable, which stops every group (mcp-guard reset ${server} after checking why)`);
+  if (kill.problem) add("kill", "fail", `${kill.file} is ${kill.problem}, which stops every group (mcp-guard reset ${server} after checking why)`);
   else if (kill.manual.server || kill.manual.all || kill.trips.length) {
     add("kill", "warn", "calls are stopped", [
       ...(kill.manual.all ? [`manual, every server: ${kill.manual.markers.all}`] : []),

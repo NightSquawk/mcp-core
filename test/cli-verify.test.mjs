@@ -87,6 +87,11 @@ test("unreadable kill or idempotency state fails; an unknown outcome warns", asy
   const kill = await cli(["verify", "column", "--json"], { env: sb.env, cwd: sb.base });
   assert.equal(kill.code, 1);
   assert.equal(levels(kill.json).kill, "fail");
+  assert.match(kill.json.checks.find((c) => c.id === "kill").message, /kill\.json is unreadable, which stops every group/);
+  writeFileSync(join(dir, "kill.json"), JSON.stringify({ trips: "corrupt" }));
+  const shape = await cli(["verify", "column", "--json"], { env: sb.env, cwd: sb.base });
+  assert.equal(shape.code, 1, "JSON that is not a list of trips fails too");
+  assert.match(shape.json.checks.find((c) => c.id === "kill").message, /kill\.json is malformed, which stops every group/);
   writeFileSync(join(dir, "kill.json"), JSON.stringify({ trips: [] }));
 
   writeFileSync(join(dir, "idempotency.json"), "[]");
