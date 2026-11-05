@@ -342,14 +342,14 @@ test("windowsPart1: a writable file or a folder the user can create in is a reas
 
 const ADMINS_SID = "S-1-5-32-544";
 const ME_SID = "S-1-5-21-1-2-3-1001";
-const WIN_CHAIN = [WIN_POLICY, "C:\\ProgramData\\NightSquawk\\mcp\\column", "C:\\ProgramData\\NightSquawk\\mcp", "C:\\ProgramData\\NightSquawk"];
+const WIN_CHAIN = [WIN_POLICY, "C:\\ProgramData\\NightSquawk\\mcp\\column", "C:\\ProgramData\\NightSquawk\\mcp", "C:\\ProgramData\\NightSquawk", "C:\\ProgramData", "C:\\"];
 const ownedBy = (map = {}, reparse = []) => (paths) => paths.map((p) => ({ path: p, owner: Object.hasOwn(map, p) ? map[p] : ADMINS_SID, reparse: reparse.includes(p) }));
 
 test("windowsPart1: a user-owned file or folder is never protected, even when it is not writable right now (the owner can change the ACL back)", () => {
   const base = { platform: "win32", env: winEnv, files: { [WIN_POLICY]: fileStat() } };
   const probes = fakeProbes({ ...base, owners: ownedBy() });
   assert.deepEqual(P.windowsPart1(WIN_POLICY, probes), { ok: true, reasons: [] });
-  assert.deepEqual(probes.calls.windowsOwners, [WIN_CHAIN], "one call covers the file and every folder up to NightSquawk");
+  assert.deepEqual(probes.calls.windowsOwners, [WIN_CHAIN], "one call covers the file and every folder up to the drive root");
   for (const sid of P.TRUSTED_OWNER_SIDS) assert.equal(P.windowsPart1(WIN_POLICY, fakeProbes({ ...base, owners: ownedBy({ [WIN_POLICY]: sid }) })).ok, true, sid);
   for (const p of WIN_CHAIN) {
     const owned = P.windowsPart1(WIN_POLICY, fakeProbes({ ...base, owners: ownedBy({ [p]: ME_SID }) }));

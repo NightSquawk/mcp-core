@@ -6,14 +6,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, parse } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { cli, dist, openPolicy, tempDir } from "./cli-helpers.mjs";
 
 const { buildManifest } = await import(dist("guard/manifest.js"));
 const { commandLine } = await import(dist("cli/harness.js"));
-const { realProbes } = await import(dist("guard/protection.js"));
+const { realProbes, TRUSTED_OWNER_SIDS } = await import(dist("guard/protection.js"));
+const { programDataDir } = await import(dist("guard/paths.js"));
 
 const windows = process.platform === "win32";
 const skip = !windows && "a Windows-host test; the other cli-*.test.mjs files cover POSIX hosts";
@@ -248,4 +249,17 @@ test("the guard's owner probe reads real owners when the parent hands down a mod
   assert.equal(owners.length, 1);
   assert.match(String(owners[0].owner), /^S-1-5-/, JSON.stringify(owners));
   assert.equal(owners[0].owner, acl(file).owner);
+});
+
+test("ProgramData and its drive root have owners the policy check accepts, and neither is a link", { skip }, () => {
+  // windowsPart1 checks owners all the way up to the drive root, so a stock install must pass there.
+  const pd = programDataDir(process.env);
+  const chain = [pd, parse(pd).root];
+  const owners = realProbes().windowsOwners(chain);
+  assert.ok(owners, "the probe answered");
+  for (const p of chain) {
+    const o = owners.find((x) => x.path.toLowerCase() === p.toLowerCase());
+    assert.ok(o && TRUSTED_OWNER_SIDS.includes(o.owner), `${p}: ${JSON.stringify(o)}`);
+    assert.equal(o.reparse, false, `${p} is a link`);
+  }
 });

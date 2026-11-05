@@ -280,7 +280,7 @@ test("posixPart2: a narrow NOPASSWD rule listed by sudo -n -l is a reason; a lis
 });
 
 const WIN = "C:\\ProgramData\\NightSquawk\\mcp\\toy\\policy.json";
-const CHAIN = [WIN, "C:\\ProgramData\\NightSquawk\\mcp\\toy", "C:\\ProgramData\\NightSquawk\\mcp", "C:\\ProgramData\\NightSquawk"];
+const CHAIN = [WIN, "C:\\ProgramData\\NightSquawk\\mcp\\toy", "C:\\ProgramData\\NightSquawk\\mcp", "C:\\ProgramData\\NightSquawk", "C:\\ProgramData", "C:\\"];
 const USER_SID = "S-1-5-21-1111-2222-3333-1001";
 const owned = (owner, over = {}) => (paths) => paths.map((p) => ({ path: p, owner: over[p]?.owner ?? owner, reparse: over[p]?.reparse ?? false }));
 
@@ -290,7 +290,7 @@ test("windowsPart1: every link must be owned by SYSTEM, Administrators or Truste
   for (const sid of TRUSTED_OWNER_SIDS) {
     const p = probes({ platform: "win32", env, files, owners: owned(sid) });
     assert.deepEqual(windowsPart1(WIN, p), { ok: true, reasons: [] }, sid);
-    assert.deepEqual(p.calls.windowsOwners, [CHAIN], "one call covering the file and each folder");
+    assert.deepEqual(p.calls.windowsOwners, [CHAIN], "one call covering the file and each folder up to the drive root");
   }
   const userFile = windowsPart1(WIN, probes({ platform: "win32", env, files, owners: owned("S-1-5-18", { [WIN]: { owner: USER_SID } }) }));
   assert.equal(userFile.ok, false, "read-only now, but its owner can change the ACL back");
@@ -299,6 +299,13 @@ test("windowsPart1: every link must be owned by SYSTEM, Administrators or Truste
   assert.ok(userTop.reasons.some((r) => r.startsWith("C:\\ProgramData\\NightSquawk is owned by")), "a user-created NightSquawk folder");
   const junction = windowsPart1(WIN, probes({ platform: "win32", env, files, owners: owned("S-1-5-32-544", { "C:\\ProgramData\\NightSquawk\\mcp": { reparse: true } }) }));
   assert.ok(junction.reasons.includes("C:\\ProgramData\\NightSquawk\\mcp is a junction or symbolic link."));
+  // Above NightSquawk only owners and links count: whoever owns ProgramData or the drive root can replace everything below.
+  const userPd = windowsPart1(WIN, probes({ platform: "win32", env, files, owners: owned("S-1-5-18", { "C:\\ProgramData": { owner: USER_SID } }) }));
+  assert.ok(userPd.reasons.includes(`C:\\ProgramData is owned by ${USER_SID}, not SYSTEM, Administrators or TrustedInstaller.`), JSON.stringify(userPd.reasons));
+  const movedPd = windowsPart1(WIN, probes({ platform: "win32", env, files, owners: owned("S-1-5-18", { "C:\\ProgramData": { reparse: true } }) }));
+  assert.deepEqual(movedPd.reasons, ["C:\\ProgramData is a junction or symbolic link."], "a ProgramData moved with a junction");
+  const userRoot = windowsPart1(WIN, probes({ platform: "win32", env, files, owners: owned("S-1-5-18", { "C:\\": { owner: USER_SID } }) }));
+  assert.ok(userRoot.reasons.includes(`C:\\ is owned by ${USER_SID}, not SYSTEM, Administrators or TrustedInstaller.`), JSON.stringify(userRoot.reasons));
   const unreadable = windowsPart1(WIN, probes({ platform: "win32", env, files, owners: null }));
   assert.ok(unreadable.reasons.includes("Could not read the owners of the policy file and its folders."));
   const partial = windowsPart1(WIN, probes({ platform: "win32", env, files, owners: (paths) => owned("S-1-5-18")(paths.slice(1)) }));
@@ -315,7 +322,7 @@ test("windowsPart1: a ProgramData redirect to a user folder is caught by the own
   const p = probes({ platform: "win32", env, files: { [policy]: file() }, owners: owned(USER_SID) });
   const part = windowsPart1(policy, p);
   assert.equal(part.ok, false);
-  assert.equal(p.calls.windowsOwners[0].at(-1), "D:\\Users\\kim\\pd\\NightSquawk");
+  assert.deepEqual(p.calls.windowsOwners[0].slice(-5), ["D:\\Users\\kim\\pd\\NightSquawk", "D:\\Users\\kim\\pd", "D:\\Users\\kim", "D:\\Users", "D:\\"]);
   const blank = probes({ platform: "win32", env: { ProgramData: "  " }, files: { [WIN]: file() }, owners: owned("S-1-5-18") });
   assert.equal(windowsPart1(WIN, blank).ok, true, "a blank ProgramData falls back to C:\\ProgramData");
 });

@@ -463,6 +463,12 @@ export function windowsPart1(policyPath: string, probes: ProtectionProbes): Prot
     if (parent === dir || !parent.toLowerCase().startsWith(top)) break;
     dir = parent;
   }
+  // Above that, up to the drive root, only owners and links are checked. Users may create files in
+  // ProgramData itself, but whoever owns a folder above the policy can replace everything below it.
+  for (let parent = win32.dirname(dir); parent !== dir; parent = win32.dirname(parent)) {
+    chain.push(parent);
+    dir = parent;
+  }
   // "Not writable right now" is not enough: an owner can always change the ACL back (attrib -R,
   // removing a self-added deny entry). Every link must be owned by SYSTEM, Administrators or
   // TrustedInstaller, and none may be a junction or symlink.

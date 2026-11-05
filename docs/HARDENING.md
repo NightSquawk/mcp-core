@@ -147,8 +147,10 @@ off. The one exception is a server reporting sandbox mode, such as a provider te
   holding each link and every folder it leads to, however many links deep. Inside a user namespace
   (rootless containers, `unshare -Ur`) owners can be forged, so it fails there.
 - Windows: opening the file for writing fails, and creating a probe file fails in each folder from
-  the policy's folder up to `%ProgramData%\NightSquawk`. Every one of those folders is owned by
-  Administrators, SYSTEM or TrustedInstaller.
+  the policy's folder up to `%ProgramData%\NightSquawk`. The file, those folders and every folder
+  above them up to the drive root (`%ProgramData%` and `C:\`) are owned by Administrators, SYSTEM or
+  TrustedInstaller, and none of them is a junction or symbolic link. A ProgramData moved to another
+  drive through a junction fails this.
 
 **Part 2: the agent's OS user cannot become admin without a factor it lacks.**
 
