@@ -28,6 +28,15 @@ describe("tokens", () => {
     assert.ok(leaves.includes("a_b_c_d"));
     assert.ok(!leaves.includes("evil_payee"));
   });
+
+  test("trustedLeaves walks any depth, and each object once", () => {
+    let deep = { id: "obj_deep" };
+    for (let i = 0; i < 70; i++) deep = { inner: [deep] };
+    assert.ok(trustedLeaves(deep).includes("obj_deep"), "past the 64 levels the walk used to stop at");
+    const loop = { id: "obj_loop" };
+    loop.self = loop;
+    assert.deepEqual(trustedLeaves(loop).sort(), ["id", "obj_loop", "self"]);
+  });
 });
 
 describe("SessionState", () => {

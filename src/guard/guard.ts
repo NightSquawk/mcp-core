@@ -406,28 +406,28 @@ export class Guard<P extends BasePolicy = BasePolicy> {
    */
   #processResult(op: OperationRef, raw: unknown, fields: readonly string[] | undefined, recordTrusted: boolean): { data: unknown; untrusted: number; whole: boolean } {
     const source = `${this.server}.${op.operationId}`;
-    let data: unknown = this.redactValue(raw);
+    const redacted = this.redactValue(raw);
+    const labelled = op.flags?.untrusted_output && fields?.length ? labelUntrustedFields(redacted, fields, source) : null;
+    // Provenance comes from the sanitized value, the one the model receives and can copy:
+    // "pay\u200bee" is recorded as the "payee" it reads, not as the pieces around the hidden character.
+    const data = sanitizeDeep(labelled ? labelled.value : redacted);
     let untrusted = 0;
     let whole = false;
-    if (op.flags?.untrusted_output) {
-      if (fields?.length) {
-        const labelled = labelUntrustedFields(data, fields, source);
-        data = labelled.value;
-        if (recordTrusted) this.session.recordTrusted(trustedLeaves(data));
-        this.session.recordUntrusted(labelled.texts, source);
-        untrusted = labelled.texts.length;
-        if (untrusted) this.session.markTainted(source, this.#clock());
-      } else {
-        // No field list: the whole result is untrusted.
-        this.session.recordUntrusted(trustedLeaves(data), source);
-        this.session.markTainted(source, this.#clock());
-        untrusted = 1;
-        whole = true;
-      }
+    if (labelled) {
+      if (recordTrusted) this.session.recordTrusted(trustedLeaves(data));
+      this.session.recordUntrusted(untrustedTexts(data), source);
+      untrusted = labelled.texts.length;
+      if (untrusted) this.session.markTainted(source, this.#clock());
+    } else if (op.flags?.untrusted_output) {
+      // No field list: the whole result is untrusted.
+      this.session.recordUntrusted(trustedLeaves(data), source);
+      this.session.markTainted(source, this.#clock());
+      untrusted = 1;
+      whole = true;
     } else if (recordTrusted) {
       this.session.recordTrusted(trustedLeaves(data));
     }
-    return { data: sanitizeDeep(data), untrusted, whole };
+    return { data, untrusted, whole };
   }
 
   get policy(): P {

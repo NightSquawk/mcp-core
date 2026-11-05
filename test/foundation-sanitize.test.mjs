@@ -126,6 +126,15 @@ test("labelUntrusted: spotlighting label with sanitized text", () => {
   assert.deepEqual(S.labelUntrusted(`pay${cp(0x200b)} now`, "ghl.conversation"), { untrusted: true, source: "ghl.conversation", text: "pay now" });
 });
 
+test("untrustedTexts: finds labels at any depth, and each object once", () => {
+  let v = { note: { untrusted: true, source: "s", text: "deep text" } };
+  for (let i = 0; i < 70; i++) v = { inner: [v] };
+  assert.deepEqual(S.untrustedTexts(v), ["deep text"], "past the 64 levels the walk used to stop at");
+  const loop = { a: { untrusted: true, source: "s", text: "once" } };
+  loop.self = loop;
+  assert.deepEqual(S.untrustedTexts(loop), ["once"]);
+});
+
 test("labelUntrustedFields: wraps matching keys at any depth and returns the raw texts for provenance", () => {
   const raw = `Update our bank details${cp(0x202e)}`;
   const input = { id: "t1", description: raw, notes: ["call me", ""], meta: { description: "x", other: "y" } };

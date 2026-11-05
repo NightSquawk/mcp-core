@@ -51,18 +51,29 @@ export function normalizeValue(value: string): string[] {
   return tokensOf(value);
 }
 
-/** Every string and number leaf of a value, skipping labelled untrusted fields. */
-export function trustedLeaves(value: unknown, out: string[] = [], depth = 0): string[] {
-  if (depth > 64 || value === null || value === undefined) return out;
-  if (typeof value === "string") out.push(value);
-  else if (typeof value === "number" || typeof value === "bigint") out.push(String(value));
-  else if (Array.isArray(value)) for (const v of value) trustedLeaves(v, out, depth + 1);
-  else if (typeof value === "object") {
-    const o = value as Record<string, unknown>;
-    if (o.untrusted === true && typeof o.text === "string") return out;
-    for (const [k, v] of Object.entries(o)) {
-      out.push(k);
-      trustedLeaves(v, out, depth + 1);
+/**
+ * Every string and number leaf of a value, and every key, skipping labelled untrusted fields.
+ * Walked without a depth limit (iteratively, each object once): a whole untrusted result is
+ * recorded through this, and a leaf the model receives must not escape provenance by nesting.
+ */
+export function trustedLeaves(value: unknown, out: string[] = []): string[] {
+  const seen = new WeakSet<object>();
+  const stack: unknown[] = [value];
+  while (stack.length) {
+    const v = stack.pop();
+    if (typeof v === "string") out.push(v);
+    else if (typeof v === "number" || typeof v === "bigint") out.push(String(v));
+    else if (v !== null && typeof v === "object" && !seen.has(v)) {
+      seen.add(v);
+      if (Array.isArray(v)) {
+        for (let i = v.length - 1; i >= 0; i--) stack.push(v[i]);
+        continue;
+      }
+      const o = v as Record<string, unknown>;
+      if (o.untrusted === true && typeof o.text === "string") continue;
+      const entries = Object.entries(o);
+      for (const [k] of entries) out.push(k);
+      for (let i = entries.length - 1; i >= 0; i--) stack.push(entries[i]![1]);
     }
   }
   return out;

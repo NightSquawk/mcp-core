@@ -92,19 +92,30 @@ export function labelUntrustedFields(
   return { value: walk(value, null), texts };
 }
 
-/** The texts of every UntrustedText label in an already-labelled value (a stored result returned again). */
-export function untrustedTexts(value: unknown, out: string[] = [], depth = 0): string[] {
-  if (depth > 64 || value === null || typeof value !== "object") return out;
-  if (Array.isArray(value)) {
-    for (const v of value) untrustedTexts(v, out, depth + 1);
-    return out;
+/**
+ * The texts of every UntrustedText label in an already-labelled value: a result as the model
+ * receives it, or a stored result returned again. Walked without a depth limit (iteratively, each
+ * object once), so a label nested deep in a result is still recorded for provenance.
+ */
+export function untrustedTexts(value: unknown, out: string[] = []): string[] {
+  const seen = new WeakSet<object>();
+  const stack: unknown[] = [value];
+  while (stack.length) {
+    const v = stack.pop();
+    if (v === null || typeof v !== "object" || seen.has(v)) continue;
+    seen.add(v);
+    if (Array.isArray(v)) {
+      for (let i = v.length - 1; i >= 0; i--) stack.push(v[i]);
+      continue;
+    }
+    const o = v as Record<string, unknown>;
+    if (o.untrusted === true && typeof o.text === "string") {
+      out.push(o.text);
+      continue;
+    }
+    const values = Object.values(o);
+    for (let i = values.length - 1; i >= 0; i--) stack.push(values[i]);
   }
-  const o = value as Record<string, unknown>;
-  if (o.untrusted === true && typeof o.text === "string") {
-    out.push(o.text);
-    return out;
-  }
-  for (const v of Object.values(o)) untrustedTexts(v, out, depth + 1);
   return out;
 }
 
