@@ -11,7 +11,7 @@ const { canonicalJson } = await import(dist("guard/canonical.js"));
 const entry = (over = {}) => ({
   server: "column",
   version: "0.0.0-test",
-  guard: "0.3.0-dev.0",
+  guard: "0.3.0",
   session: "s1",
   tool: "column_change",
   operation: "counterparty_create",
