@@ -243,5 +243,33 @@ export function writeJsonFile(path: string, value: unknown): void {
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(value, null, 2) + "\n", { mode: 0o600 });
-  renameSync(tmp, path);
+  replaceFileSync(tmp, path);
+}
+
+const RENAME_RETRY_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
+
+/**
+ * Rename `from` over `to`. On Windows a rename onto a file that another process has
+ * open (Defender or the search indexer scanning the last write, a reader closing it)
+ * fails with EPERM, EACCES or EBUSY for a moment, so it is retried for up to about a
+ * second. Elsewhere those codes are real errors and are thrown at once. On failure
+ * the temp file is removed.
+ */
+export function replaceFileSync(from: string, to: string): void {
+  let delay = 5;
+  for (let waited = 0; ; ) {
+    try {
+      renameSync(from, to);
+      return;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code ?? "";
+      if (process.platform !== "win32" || !RENAME_RETRY_CODES.has(code) || waited >= 1000) {
+        rmSync(from, { force: true });
+        throw e;
+      }
+      sleepSync(delay);
+      waited += delay;
+      delay = Math.min(delay * 2, 100);
+    }
+  }
 }

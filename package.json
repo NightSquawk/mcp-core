@@ -1,6 +1,6 @@
 {
   "name": "@nightsquawktech/mcp-core",
-  "version": "0.3.0-dev.0",
+  "version": "0.3.0",
   "description": "Shared runtime for NightSquawk catalog-backed MCP servers: stdio bootstrap, catalog primitives, and the guard (tiers, policy, approvals, audit).",
   "license": "AGPL-3.0-only",
   "type": "module",

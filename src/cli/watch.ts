@@ -7,8 +7,9 @@
  * keys and counts only, so neither one holds a secret. The files it reads do
  * (MCP env blocks, API keys), so it never prints their content.
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { canonicalJson, sha256Hex } from "../guard/canonical.js";
+import { replaceFileSync } from "../guard/lock.js";
 import { claudeDesktopConfig, clientPaths, codexHome } from "./clients.js";
 import { pathLib, stateRoot } from "./context.js";
 import { adminFileCommands } from "./harness.js";
@@ -373,7 +374,7 @@ function writeBaseline(io: CliIo, path: string, text: string): void {
   mkdirSync(lib.dirname(path), { recursive: true, mode: 0o700 });
   const tmp = `${path}.${io.pid}.tmp`;
   writeFileSync(tmp, text, { mode: 0o600 });
-  renameSync(tmp, path);
+  replaceFileSync(tmp, path);
 }
 
 function isDir(path: string): boolean {
